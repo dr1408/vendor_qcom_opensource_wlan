@@ -41,6 +41,7 @@
 #include "wma_types.h"
 #include "lim_api.h"
 #include "lim_session_utils.h"
+#include "wma_frame_inject.h"
 
 #include "cds_utils.h"
 
@@ -477,11 +478,17 @@ static void wma_handle_monitor_mode_vdev_detach(tp_wma_handle wma,
 						uint8_t vdev_id)
 {
 	struct wma_txrx_node *iface;
+	struct del_bss_resp *resp;
 
 	iface = &wma->interfaces[vdev_id];
-	wlan_vdev_mlme_sm_deliver_evt(iface->vdev,
-				      WLAN_VDEV_SM_EV_DOWN,
-				      0, NULL);
+	resp = qdf_mem_malloc(sizeof(*resp));
+	if (resp) {
+		resp->vdev_id = vdev_id;
+		resp->status = QDF_STATUS_SUCCESS;
+		wlan_vdev_mlme_sm_deliver_evt(iface->vdev,
+					      WLAN_VDEV_SM_EV_DOWN,
+					      sizeof(*resp), resp);
+	}
 	iface->vdev_active = false;
 }
 
@@ -3326,6 +3333,10 @@ int wma_peer_create_confirm_handler(void *handle, uint8_t *evt_param_info,
 
 	wma_debug("vdev:%d Peer create confirm for bssid: " QDF_MAC_ADDR_FMT,
 		  peer_create_rsp->vdev_id, QDF_MAC_ADDR_REF(peer_mac.bytes));
+	if (wma_injection_peer_create_response(
+		peer_create_rsp->vdev_id, peer_mac.bytes,
+		peer_create_rsp->status))
+		return 0;
 	req_msg = wma_find_remove_req_msgtype(wma, peer_create_rsp->vdev_id,
 					      WMA_PEER_CREATE_REQ);
 	if (!req_msg) {
@@ -3388,10 +3399,6 @@ int wma_peer_delete_handler(void *handle, uint8_t *cmd_param_info,
 	int status = 0;
 	struct mac_context *mac = cds_get_context(QDF_MODULE_ID_PE);
 
-	if (!mac) {
-		wma_err("mac context is null");
-		return -EINVAL;
-	}
 	param_buf = (WMI_PEER_DELETE_RESP_EVENTID_param_tlvs *)cmd_param_info;
 	if (!param_buf) {
 		wma_err("Invalid vdev delete event buffer");
@@ -3405,6 +3412,12 @@ int wma_peer_delete_handler(void *handle, uint8_t *cmd_param_info,
 	}
 
 	WMI_MAC_ADDR_TO_CHAR_ARRAY(&event->peer_macaddr, macaddr);
+	if (wma_injection_peer_delete_response(event->vdev_id, macaddr))
+		return 0;
+	if (!mac) {
+		wma_err("mac context is null");
+		return -EINVAL;
+	}
 	wma_debug("Peer Delete Response, vdev %d Peer "QDF_MAC_ADDR_FMT,
 			event->vdev_id, QDF_MAC_ADDR_REF(macaddr));
 	wlan_roam_debug_log(event->vdev_id, DEBUG_PEER_DELETE_RESP,
