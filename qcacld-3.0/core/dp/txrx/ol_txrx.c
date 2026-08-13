@@ -874,6 +874,12 @@ ol_txrx_pdev_attach(ol_txrx_soc_handle soc,
 		status = QDF_STATUS_E_NOMEM;
 		goto fail0;
 	}
+	/*
+	 * Ensure deterministic default before WMI service bitmap is available.
+	 * flow-control setup in pdev_post_attach depends on this flag to decide
+	 * whether to create the legacy global mgmt tx pool.
+	 */
+	pdev->is_mgmt_over_wmi_enabled = 0;
 
 	/* init LL/HL cfg here */
 	pdev->cfg.is_high_latency = ol_cfg_is_high_latency(cfg_pdev);
@@ -5832,7 +5838,7 @@ static void ol_txrx_wrapper_flush_rx_frames(struct cdp_soc_t *soc_hdl,
 						   PEER_DEBUG_ID_OL_INTERNAL);
 	if (!peer) {
 		ol_txrx_err("peer "QDF_MAC_ADDR_FMT" not found",
-			    QDF_MAC_ADDR_REF(peer_mac));
+			    QDF_MAC_ADDR_REF((uint8_t *)peer_mac));
 		return;
 	}
 
