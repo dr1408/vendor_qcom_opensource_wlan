@@ -30,6 +30,8 @@
 #include <linux/init.h>
 #include <linux/etherdevice.h>
 #include <linux/wireless.h>
+#include <linux/cred.h>
+#include <linux/uidgid.h>
 #include "osif_sync.h"
 #include <wlan_hdd_includes.h>
 #include <net/arp.h>
@@ -158,6 +160,10 @@
 #include "os_if_nan.h"
 #include "wlan_hdd_apf.h"
 #include "wlan_hdd_cfr.h"
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+#include "wlan_hdd_frame_inject.h"
+#include "wma_frame_inject.h"
+#endif
 #include "wlan_hdd_ioctl.h"
 #include "wlan_cm_roam_ucfg_api.h"
 #include "hif.h"
@@ -18375,8 +18381,13 @@ const struct wiphy_vendor_command hdd_wiphy_vendor_commands[] = {
 	FEATURE_DISA_VENDOR_COMMANDS
 	FEATURE_TDLS_VENDOR_COMMANDS
 	FEATURE_SAR_LIMITS_VENDOR_COMMANDS
-	BCN_RECV_FEATURE_VENDOR_COMMANDS
 	FEATURE_VENDOR_SUBCMD_SET_TRACE_LEVEL
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	FEATURE_FRAME_INJECTION_VENDOR_COMMANDS
+#endif
+#ifdef WLAN_BCN_RECV_FEATURE
+	BCN_RECV_FEATURE_VENDOR_COMMANDS
+#endif
 #ifdef WLAN_FEATURE_LINK_LAYER_STATS
 	{
 		.info.vendor_id = QCA_NL80211_VENDOR_ID,
@@ -19894,6 +19905,7 @@ static bool hdd_is_client_mode(enum QDF_OPMODE mode)
 	case QDF_STA_MODE:
 	case QDF_P2P_CLIENT_MODE:
 	case QDF_P2P_DEVICE_MODE:
+	case QDF_MONITOR_MODE:
 		return true;
 	default:
 		return false;
@@ -19905,6 +19917,7 @@ static bool hdd_is_ap_mode(enum QDF_OPMODE mode)
 	switch (mode) {
 	case QDF_SAP_MODE:
 	case QDF_P2P_GO_MODE:
+	case QDF_MONITOR_MODE:
 		return true;
 	default:
 		return false;
@@ -19975,6 +19988,32 @@ static int __wlan_hdd_cfg80211_change_iface(struct wiphy *wiphy,
 		  ndev->name,
 		  qdf_opmode_str(adapter->device_mode),
 		  qdf_opmode_str(new_mode));
+
+	if (adapter->device_mode == QDF_MONITOR_MODE &&
+	    new_mode == QDF_MONITOR_MODE) {
+		ndev->ieee80211_ptr->iftype = type;
+		hdd_exit();
+		return 0;
+	}
+
+	/*
+	 * Android framework daemons can race monitor mode by forcing station
+	 * iftype transitions right after monitor enable. Reject non-root
+	 * monitor->non-monitor requests while monitor global mode is active.
+	 *
+	 * Return an error instead of success so cfg80211 doesn't WARN on
+	 * iftype mismatch (it expects iftype to match @type when callback
+	 * returns success).
+	 */
+	if ((adapter->device_mode == QDF_MONITOR_MODE ||
+	     hdd_get_conparam() == QDF_GLOBAL_MONITOR_MODE) &&
+	    new_mode != QDF_MONITOR_MODE &&
+	    !uid_eq(current_euid(), GLOBAL_ROOT_UID)) {
+		hdd_warn_rl("rejecting monitor->%s iface change from %s",
+			    qdf_opmode_str(new_mode), current->comm);
+		hdd_exit();
+		return -EOPNOTSUPP;
+	}
 
 	errno = hdd_trigger_psoc_idle_restart(hdd_ctx);
 	if (errno) {
@@ -23468,6 +23507,10 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 	uint8_t max_fw_bw;
 	enum phy_ch_width ch_width;
 	qdf_freq_t sec_ch_2g_freq = 0;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	tp_wma_handle injection_wma = NULL;
+	bool injection_transition = false;
+#endif
 
 	hdd_enter();
 
@@ -23538,21 +23581,53 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 	wlan_reg_set_channel_params_for_freq(hdd_ctx->pdev,
 					     chandef->chan->center_freq,
 					     sec_ch_2g_freq, &ch_params);
-	if (wlan_hdd_change_hw_mode_for_given_chnl(adapter,
-						   chandef->chan->center_freq,
-						   POLICY_MGR_UPDATE_REASON_SET_OPER_CHAN)) {
-		hdd_err("Failed to change hw mode");
-		return -EINVAL;
-	}
-
 	if (adapter->monitor_mode_vdev_up_in_progress) {
 		hdd_err_rl("monitor mode vdev up in progress");
 		return -EBUSY;
 	}
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	injection_wma = cds_get_context(QDF_MODULE_ID_WMA);
+	if (injection_wma) {
+		status = wma_injection_notify_channel_change(
+			injection_wma, adapter->vdev_id,
+			chandef->chan->center_freq);
+		if (QDF_IS_STATUS_ERROR(status)) {
+			/*
+			 * Do not fail monitor channel switching because helper
+			 * cleanup/retune timed out. The helper rolls back its own
+			 * transition state and the per-frame ensure path can lazily
+			 * retune before the next injection.
+			 */
+			hdd_debug_rl("Injection helper retune skipped for %u: %d",
+				     chandef->chan->center_freq, status);
+			injection_transition = false;
+		} else {
+			injection_transition = true;
+		}
+	}
+#endif
+
+	if (wlan_hdd_change_hw_mode_for_given_chnl(adapter,
+						   chandef->chan->center_freq,
+						   POLICY_MGR_UPDATE_REASON_SET_OPER_CHAN)) {
+		hdd_err("Failed to change hw mode");
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (injection_transition)
+			wma_injection_complete_channel_change(
+				injection_wma, adapter->vdev_id, false);
+#endif
+		return -EINVAL;
+	}
+
 	status = qdf_event_reset(&adapter->qdf_monitor_mode_vdev_up_event);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		hdd_err_rl("failed to reinit monitor mode vdev up event");
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (injection_transition)
+			wma_injection_complete_channel_change(
+				injection_wma, adapter->vdev_id, false);
+#endif
 		return qdf_status_to_os_return(status);
 	}
 	adapter->monitor_mode_vdev_up_in_progress = true;
@@ -23566,6 +23641,11 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 			   status);
 		adapter->monitor_mode_vdev_up_in_progress = false;
 		ret = qdf_status_to_os_return(status);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (injection_transition)
+			wma_injection_complete_channel_change(
+				injection_wma, adapter->vdev_id, false);
+#endif
 		return ret;
 	}
 
@@ -23589,8 +23669,22 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 				  status);
 
 		adapter->monitor_mode_vdev_up_in_progress = false;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+		if (injection_transition)
+			wma_injection_complete_channel_change(
+				injection_wma, adapter->vdev_id, false);
+#endif
 		return qdf_status_to_os_return(status);
 	}
+
+	adapter->mon_chan_freq = chandef->chan->center_freq;
+	adapter->mon_bandwidth = ch_width;
+
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (injection_transition)
+		wma_injection_complete_channel_change(
+			injection_wma, adapter->vdev_id, true);
+#endif
 
 	hdd_exit();
 
