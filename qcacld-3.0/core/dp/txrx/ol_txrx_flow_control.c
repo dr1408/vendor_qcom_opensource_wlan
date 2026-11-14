@@ -825,7 +825,8 @@ static void ol_tx_flow_pool_vdev_unmap(struct ol_tx_flow_pool_t *pool,
 
 	vdev = (struct ol_txrx_vdev_t *)ol_txrx_get_vdev_from_vdev_id(vdev_id);
 	if (!vdev) {
-		ol_txrx_dbg("invalid vdev_id %d", vdev_id);
+		pr_warn_ratelimited("VIFDIAG flow-unmap missing host DP vdev=%u; no mapping repair attempted\n",
+				    vdev_id);
 		return;
 	}
 

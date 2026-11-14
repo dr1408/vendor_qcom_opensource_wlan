@@ -1602,6 +1602,10 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 
 			qdf_spin_lock_bh(&pdev->peer_ref_mutex);
 			mon_peer = pdev->self_peer;
+			if (pdev->monitor_vdev)
+				pr_info_ratelimited("VIFRX classify peer_id=%u known_peer=%u self_match=%u monitor_vdev=%u offload=%u\n",
+					peer_id, !!peer, peer == mon_peer,
+					pdev->monitor_vdev->vdev_id, is_offload);
 			mon_candidate = pdev->monitor_vdev &&
 				(!peer || peer == mon_peer);
 			if (mon_candidate && mon_peer && mon_peer->valid &&

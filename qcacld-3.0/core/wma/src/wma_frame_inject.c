@@ -24,6 +24,7 @@
  * injected 802.11 frames through the firmware interface.
  */
 
+#include "wlan_hdd_vif_trace.h"
 #include "wma.h"
 #include "wma_frame_inject.h"
 #include "wlan_hdd_frame_inject.h"
@@ -1160,6 +1161,7 @@ static QDF_STATUS wma_injection_destroy_tx_vdev(tp_wma_handle wma)
 			g_inj_tx_vdev.vdev_id, STOP_RESPONSE_BIT);
 		wma_warn("Injection helper vdev stop failed: vdev=%u status=%d",
 			 g_inj_tx_vdev.vdev_id, status);
+		return status;
 	} else {
 		status = target_if_vdev_mgr_fw_only_rsp_wait(
 			g_inj_tx_vdev.vdev_id, STOP_RESPONSE_BIT,
@@ -2772,6 +2774,9 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 		return QDF_STATUS_E_NOMEM;
 	}
 
+	wlan_vif_trace_frame("wma-input", req->session_id, vdev_id,
+			     tx_chanfreq, req->frame_data, req->frame_len);
+
 	/* Copy frame data to WMI buffer */
 	frame_data = qdf_nbuf_put_tail(wmi_buf, req->frame_len);
 	if (!frame_data) {
@@ -2900,6 +2905,13 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 		return status;
 	}
 
+	wlan_vif_trace_frame("wmi-submit", req->session_id,
+			     mgmt_params.vdev_id, tx_chanfreq,
+			     frame_data, req->frame_len);
+	pr_info_ratelimited("VIFTRACE stage=wmi-link id=%u desc=%u route_vdev=%u tx_vdev=%u\n",
+			    req->session_id, mgmt_params.desc_id, vdev_id,
+			    mgmt_params.vdev_id);
+
 	/* Attempt WMI management TX path. */
 	wmi_tx_attempted = true;
 	/* Publish ownership before submission so an immediate completion can free it. */
@@ -2920,6 +2932,8 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 	qdf_atomic_inc(&g_wma_injection_ctx.inflight_count);
 
 	status = wmi_mgmt_unified_cmd_send(wma_handle->wmi_handle, &mgmt_params);
+	pr_info_ratelimited("VIFTRACE stage=wmi-result desc=%u status=%d\n",
+			    mgmt_params.desc_id, status);
 	if (!QDF_IS_STATUS_ERROR(status)) {
 		wmi_tx_ok = true;
 		g_wma_injection_ctx.stats.command_submitted++;
@@ -3037,6 +3051,8 @@ QDF_STATUS wma_handle_injection_fw_response(tp_wma_handle wma_handle,
 		return QDF_STATUS_SUCCESS;
 	}
 
+	pr_info_ratelimited("VIFTRACE stage=fw-completion desc=%u status=%u\n",
+			    desc_id, status);
 	/* Map firmware status to string for logging */
 	switch (status) {
 	case WMI_MGMT_TX_COMP_TYPE_COMPLETE_OK:

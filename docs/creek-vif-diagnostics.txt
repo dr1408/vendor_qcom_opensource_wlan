@@ -1,0 +1,39 @@
+Creek OL monitor diagnostics
+===========================
+
+Scope: defensive input/lifecycle checks and header-only, rate-limited dmesg
+tracing. No new frame types, injection routes, firmware helpers or concurrency
+combinations are enabled by this change.
+
+Prefixes:
+ VIFTRACE netdev-input: interface/vdev and raw skb length, before parsing.
+ VIFTRACE hdd-parsed: decoded header before management-only admission (id=0).
+ VIFTRACE hdd-submit / wma-input: existing request session id and header.
+ VIFTRACE wmi-submit / wmi-link: post-processing header, route/actual vdev,
+                               request id and firmware descriptor id.
+ VIFTRACE wmi-result / fw-completion: descriptor id and status.
+ VIFRX classify: indication reached OL, peer match and monitor ownership.
+ VIFDIAG: monitor ownership rejection or missing host DP flow mapping.
+
+Headers include FC, type/subtype, address slots, sequence control and, only for
+unprotected deauth/disassociation frames, reason code. Address 4 and reason/seq
+validity have explicit flags. Zero address slots may mean absent/truncated.
+No packet payload is dumped. addr1-4 are slots, not assumed SA/DA/BSSID.
+
+Limits:
+ - Existing session IDs are not guaranteed globally unique and may wrap.
+ - Each logging site is independently rate-limited; missing lines are NOT proof
+   of missing packets. hdd-parsed and netdev-input are not individually linked.
+ - Firmware-generated transmissions do not pass through host TX tracing.
+ - Capture replies externally does not prove monitor RX delivered them locally.
+ - No automatic host DP vdev is fabricated for firmware-only helpers. Missing
+   mapping logs remain evidence, not a repaired concurrency implementation.
+ - DMA timeout reclamation and callback quiescence require a separate ownership
+   fix. This change does not claim those unresolved risks are repaired.
+ - Ambiguous legacy raw-versus-radiotap autodetection remains; recognized
+   radiotap with truncated advertised fields is rejected, not partially used.
+
+Validation performed locally: whitespace checks; standalone logger compiled
+with -Wall -Wextra -Werror and UBSan; all 65536 FC values at lengths 0..64,
+with a protected guard page after the buffer, plus NULL input. This is not a
+full driver build or hardware test. ASan could not initialize on the host.

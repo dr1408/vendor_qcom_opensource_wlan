@@ -25,6 +25,7 @@
 
 /* denote that this file does not allow legacy hddLog */
 #define HDD_DISALLOW_LEGACY_HDDLOG 1
+#include "wlan_hdd_vif_trace.h"
 #include "osif_sync.h"
 #include <wlan_hdd_tx_rx.h>
 #include <wlan_hdd_softap_tx_rx.h>
@@ -1975,7 +1976,7 @@ static bool hdd_parse_radiotap_tx_params(const uint8_t *data, uint32_t len,
 	 * the pointer, extract if it's a field we care about, then advance
 	 * past it.
 	 */
-	for (bit = 0; bit <= RADIOTAP_F_HE && ptr < end; bit++) {
+	for (bit = 0; bit <= RADIOTAP_F_HE; bit++) {
 		const struct radiotap_field_info *fi;
 		unsigned long off;
 
@@ -1995,8 +1996,8 @@ static bool hdd_parse_radiotap_tx_params(const uint8_t *data, uint32_t len,
 		}
 
 		/* Bounds check before reading */
-		if (ptr + fi->size > end)
-			break;
+		if (ptr > end || fi->size > end - ptr)
+			return false;
 
 		/* Extract fields we care about */
 		switch (bit) {
@@ -2247,6 +2248,9 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		adapter->injection_ctx->is_monitor_mode = true;
 	}
 
+	pr_info_ratelimited("VIFTRACE stage=netdev-input if=%s vdev=%u len=%u\n",
+			    dev->name, adapter->vdev_id, skb->len);
+
 	if (skb->len < 10) {
 		hdd_err_rl("monitor tx: invalid skb len %u", skb->len);
 		goto drop;
@@ -2275,6 +2279,11 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		rtap_parsed = hdd_parse_radiotap_tx_params(skb->data,
 							   skb->len,
 							   &rtap_params);
+		if (!rtap_parsed) {
+			pr_warn_ratelimited("VIFTRACE drop=malformed-radiotap if=%s len=%u\n",
+					    dev->name, skb->len);
+			goto drop;
+		}
 		frame_data = skb->data + rtap_len;
 		frame_len = skb->len - rtap_len;
 	} else {
@@ -2287,6 +2296,8 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		goto drop;
 	}
 
+	wlan_vif_trace_frame("hdd-parsed", 0, adapter->vdev_id, 0,
+			     frame_data, frame_len);
 	if (!hdd_injection_frame_is_valid(frame_data, frame_len)) {
 		goto drop;
 	}
@@ -2378,7 +2389,10 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		req->tx_rate = 0;
 	}
 
+	wlan_vif_trace_frame("hdd-submit", req->session_id, adapter->vdev_id,
+			     0, req->frame_data, req->frame_len);
 	status = hdd_process_frame_injection(adapter, req);
+	pr_info_ratelimited("VIFTRACE stage=hdd-result status=%d\n", status);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		hdd_err_rl("monitor tx: frame injection enqueue failed: %d", status);
 		qdf_mem_free(req->frame_data);
