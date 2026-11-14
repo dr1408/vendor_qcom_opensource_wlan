@@ -2614,9 +2614,14 @@ ol_txrx_peer_attach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 #ifdef QCA_SUPPORT_PEER_DATA_RX_RSSI
 	peer->rssi_dbm = HTT_RSSI_INVALID;
 #endif
-	if ((QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()) &&
-	    !pdev->self_peer) {
-		pdev->self_peer = peer;
+	if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam() ||
+	    vdev->opmode == wlan_op_mode_monitor) {
+		qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+		if (!pdev->self_peer)
+			pdev->self_peer = peer;
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		ol_txrx_warn("VIFRX self-peer vdev=%u con_mode=%u forwarding=disabled",
+			     vdev_id, cds_get_conparam());
 		/*
 		 * No Tx in monitor mode, otherwise results in target assert.
 		 * Setting disable_intrabss_fwd to true
@@ -3308,6 +3313,11 @@ int ol_txrx_peer_release_ref(ol_txrx_peer_handle peer,
 
 	if (qdf_atomic_dec_and_test(&peer->ref_cnt)) {
 		u16 peer_id;
+
+		if (pdev->self_peer == peer) {
+			pdev->self_peer = NULL;
+			ol_txrx_warn("VIFRX self-peer-clear vdev=%u", vdev->vdev_id);
+		}
 		wlan_roam_debug_log(vdev->vdev_id,
 				    DEBUG_DELETING_PEER_OBJ,
 				    DEBUG_INVALID_PEER_ID,
@@ -3409,10 +3419,6 @@ int ol_txrx_peer_release_ref(ol_txrx_peer_handle peer,
 		ol_txrx_peer_free_tids(peer);
 
 		ol_txrx_dump_peer_access_list(peer);
-
-		if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam() &&
-		    pdev->self_peer == peer)
-			pdev->self_peer = NULL;
 
 		if (!del_rc)
 			qdf_mem_free(peer);
@@ -5021,8 +5027,9 @@ static void ol_rx_data_handler(struct ol_txrx_pdev_t *pdev,
 		goto free_buf;
 
 	qdf_spin_lock_bh(&peer->peer_info_lock);
-	if (qdf_unlikely(!(peer->state >= OL_TXRX_PEER_STATE_CONN) ||
-					 !peer->vdev->rx)) {
+	if (qdf_unlikely((peer->state < OL_TXRX_PEER_STATE_CONN &&
+			  peer->vdev->opmode != wlan_op_mode_monitor) ||
+			 !peer->vdev->rx)) {
 		qdf_spin_unlock_bh(&peer->peer_info_lock);
 		ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_RX_THREAD);
 		goto free_buf;
@@ -5184,7 +5191,8 @@ void ol_rx_data_process(struct ol_txrx_peer_t *peer,
 	qdf_assert(peer->vdev);
 
 	qdf_spin_lock_bh(&peer->peer_info_lock);
-	if (peer->state >= OL_TXRX_PEER_STATE_CONN)
+	if (peer->state >= OL_TXRX_PEER_STATE_CONN ||
+	    peer->vdev->opmode == wlan_op_mode_monitor)
 		data_rx = peer->vdev->rx;
 	qdf_spin_unlock_bh(&peer->peer_info_lock);
 

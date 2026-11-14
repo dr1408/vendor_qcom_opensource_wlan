@@ -27,6 +27,9 @@
 
 #include <htt_types.h>
 
+/* Fixed at module load; capture fields are programmed at HTT attachment. */
+bool htt_ol_monitor_vif_rx_enabled(void);
+
 /* htt_rx.c */
 #define RX_MSDU_END_4_FIRST_MSDU_MASK \
 	(pdev->targetdef->d_RX_MSDU_END_4_FIRST_MSDU_MASK)

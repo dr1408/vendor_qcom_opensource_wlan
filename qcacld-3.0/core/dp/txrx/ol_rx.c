@@ -17,6 +17,7 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <linux/ratelimit.h>
 #include <qdf_nbuf.h>               /* qdf_nbuf_t, etc. */
 #include <qdf_util.h>               /* qdf_cpu_to_le64 */
 #include <qdf_types.h>              /* bool */
@@ -1574,6 +1575,8 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	uint32_t filled = 0;
 	uint8_t bssid[QDF_MAC_ADDR_SIZE];
 	bool offloaded_pkt;
+	bool vif_monitor_rx = false;
+	bool mon_candidate = false;
 	struct ol_txrx_soc_t *soc = cds_get_context(QDF_MODULE_ID_SOC);
 
 	if (qdf_unlikely(!soc))
@@ -1590,6 +1593,27 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 			peer = pdev->self_peer;
 		else
 			peer = ol_txrx_peer_find_by_id(pdev, peer_id);
+		/* Pin the monitor peer before examining or consuming its RX buffers.
+		 * Known STA peers keep normal parsing; never mirror Ethernet traffic.
+		 */
+		if (cds_get_conparam() != QDF_GLOBAL_MONITOR_MODE &&
+		    htt_ol_monitor_vif_rx_enabled()) {
+			struct ol_txrx_peer_t *mon_peer;
+
+			qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+			mon_peer = pdev->self_peer;
+			mon_candidate = pdev->monitor_vdev &&
+				(!peer || peer == mon_peer);
+			if (mon_candidate && mon_peer && mon_peer->valid &&
+			    mon_peer->vdev == pdev->monitor_vdev &&
+			    !qdf_atomic_read(&mon_peer->delete_in_progress) &&
+			    !qdf_atomic_read(&mon_peer->vdev->delete.detaching)) {
+				ol_txrx_peer_get_ref(mon_peer, PEER_DEBUG_ID_OL_INTERNAL);
+				peer = mon_peer;
+				vif_monitor_rx = true;
+			}
+			qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		}
 		htt_pdev = pdev->htt_pdev;
 	} else {
 		ol_txrx_err("Invalid pdev passed!");
@@ -1602,6 +1626,13 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 		  rx_ind_msg, peer_id, tid, is_offload);
 #endif
 
+	if (qdf_nbuf_len(rx_ind_msg) < HTT_RX_IN_ORD_PADDR_IND_HDR_BYTES) {
+		pr_warn_ratelimited("VIFRX short-indication bytes=%u\n",
+				    qdf_nbuf_len(rx_ind_msg));
+		if (vif_monitor_rx)
+			ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_INTERNAL);
+		return;
+	}
 	pktlog_bit = (htt_rx_amsdu_rx_in_order_get_pktlog(rx_ind_msg) == 0x01);
 	rx_ind_data = qdf_nbuf_data(rx_ind_msg);
 	msg_word = (uint32_t *)rx_ind_data;
@@ -1615,12 +1646,37 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	 * This also attaches each rx MSDU descriptor to the
 	 * corresponding rx MSDU network buffer.
 	 */
-	status = htt_rx_amsdu_pop(htt_pdev, rx_ind_msg, &head_msdu,
-				  &tail_msdu, &msdu_count);
+	if (vif_monitor_rx && (!msdu_count ||
+	    qdf_nbuf_len(rx_ind_msg) < HTT_RX_IN_ORD_PADDR_IND_HDR_BYTES ||
+	    msdu_count > (qdf_nbuf_len(rx_ind_msg) -
+			HTT_RX_IN_ORD_PADDR_IND_HDR_BYTES) /
+			HTT_RX_IN_ORD_PADDR_IND_MSDU_BYTES)) {
+		pr_warn_ratelimited("VIFRX malformed-indication peer_id=%u msdus=%u bytes=%u\n",
+				    peer_id, msdu_count, qdf_nbuf_len(rx_ind_msg));
+		ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_INTERNAL);
+		return;
+	}
+
+	if (vif_monitor_rx) {
+		pr_info_ratelimited("VIFRX indication peer_id=%u monitor_vdev=%u msdus=%u parser=monitor\n",
+				    peer_id, peer->vdev->vdev_id, msdu_count);
+		status = htt_rx_mon_amsdu_rx_in_order_pop_ll(htt_pdev,
+				rx_ind_msg, &head_msdu, &tail_msdu, &msdu_count);
+	} else {
+		if (mon_candidate)
+			pr_warn_ratelimited("VIFRX no-valid-self-peer peer_id=%u parser=normal\n",
+					    peer_id);
+		status = htt_rx_amsdu_pop(htt_pdev, rx_ind_msg, &head_msdu,
+					 &tail_msdu, &msdu_count);
+	}
 	ol_rx_ind_record_event(status, OL_RX_INDICATION_POP_END);
 
 	if (qdf_unlikely(0 == status)) {
 		ol_txrx_warn("pop failed");
+		if (vif_monitor_rx) {
+			pr_warn_ratelimited("VIFRX parser-failed peer_id=%u\n", peer_id);
+			ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_INTERNAL);
+		}
 		return;
 	}
 
@@ -1634,12 +1690,33 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 
 	if (!head_msdu) {
 		ol_txrx_dbg("No packet to send to HDD");
+		if (vif_monitor_rx) {
+			pr_info_ratelimited("VIFRX parser-empty peer_id=%u\n", peer_id);
+			ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_INTERNAL);
+		}
 		return;
 	}
 
 	/* Send the chain of MSDUs to the OS */
 	/* rx_opt_proc takes a NULL-terminated list of msdu netbufs */
 	qdf_nbuf_set_next(tail_msdu, NULL);
+
+	if (mon_candidate && !vif_monitor_rx) {
+		/* A deleting/unregistered monitor must not fall into forwarding. */
+		ol_rx_frames_free(htt_pdev, head_msdu);
+		return;
+	}
+
+	if (vif_monitor_rx) {
+		/* Radiotap buffers must never enter pktlog descriptor access,
+		 * Ethernet decapsulation, peer filtering or RX-to-TX forwarding.
+		 */
+		pr_info_ratelimited("VIFRX dispatch vdev=%u bytes=%u replenished=%u forwarding=bypassed\n",
+				    peer->vdev->vdev_id, qdf_nbuf_len(head_msdu), filled);
+		ol_rx_data_process(peer, head_msdu);
+		ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_INTERNAL);
+		return;
+	}
 
 	/* Packet Capture Mode */
 

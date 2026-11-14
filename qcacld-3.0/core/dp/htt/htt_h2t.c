@@ -33,6 +33,8 @@
  *      from the host to the target.
  */
 
+#include <linux/moduleparam.h>
+#include <linux/ratelimit.h>
 #include <qdf_mem.h>         /* qdf_mem_copy */
 #include <qdf_nbuf.h>           /* qdf_nbuf_map_single */
 #include <htc_api.h>            /* HTC_PACKET */
@@ -72,6 +74,25 @@ do {                                                             \
 	htc_send_pkt(pdev->htc_pdev, &pkt->htc_pkt);
 #endif
 
+
+/* Experimental OL VIF RX: configure capture fields before RX attachment.
+ * Read-only after module load; do not change descriptor format on a live ring.
+ * Normal STA indications retain their normal parser and delivery path.
+ */
+#if defined(FEATURE_MONITOR_MODE_SUPPORT) && \
+    defined(FEATURE_FRAME_INJECTION_SUPPORT) && \
+    defined(WLAN_FULL_REORDER_OFFLOAD) && !defined(CONFIG_HL_SUPPORT)
+static bool ol_monitor_vif_rx = true;
+#else
+static bool ol_monitor_vif_rx;
+#endif
+module_param(ol_monitor_vif_rx, bool, 0444);
+MODULE_PARM_DESC(ol_monitor_vif_rx, "Experimental OL monitor VIF RX (load-time only)");
+
+bool htt_ol_monitor_vif_rx_enabled(void)
+{
+	return ol_monitor_vif_rx;
+}
 
 static void
 htt_h2t_send_complete_free_netbuf(void *pdev, QDF_STATUS status,
@@ -534,7 +555,8 @@ QDF_STATUS htt_h2t_rx_ring_cfg_msg_ll(struct htt_pdev_t *pdev)
 	enable_ppdu_start = 0;
 	enable_ppdu_end = 0;
 #endif
-	if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()) {
+	if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam() ||
+	    htt_ol_monitor_vif_rx_enabled()) {
 		enable_ctrl_data  = 1;
 		enable_mgmt_data  = 1;
 		enable_null_data  = 1;
@@ -548,6 +570,10 @@ QDF_STATUS htt_h2t_rx_ring_cfg_msg_ll(struct htt_pdev_t *pdev)
 			  __func__, __LINE__);
 	}
 
+	pr_info("VIFRX ring-config con_mode=%u vif_test=%u mgmt=%d ctrl=%d hdr=%d ppdu=%d/%d\n",
+		cds_get_conparam(), htt_ol_monitor_vif_rx_enabled(),
+		enable_mgmt_data, enable_ctrl_data, enable_hdr,
+		enable_ppdu_start, enable_ppdu_end);
 	htt_rx_enable_ppdu_end(&enable_ppdu_end);
 	HTT_RX_RING_CFG_ENABLED_802_11_HDR_SET(*msg_word, enable_hdr);
 	HTT_RX_RING_CFG_ENABLED_MSDU_PAYLD_SET(*msg_word, 1);

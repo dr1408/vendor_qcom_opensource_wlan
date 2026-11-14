@@ -52,6 +52,7 @@
 #include "pld_common.h"
 #include <cdp_txrx_misc.h>
 #include "wlan_hdd_rx_monitor.h"
+#include <linux/ratelimit.h>
 #include "wlan_hdd_power.h"
 #include "wlan_hdd_cfg80211.h"
 #include <wlan_hdd_tsf.h>
@@ -1570,8 +1571,26 @@ QDF_STATUS hdd_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
 	/* walk the chain until all are processed */
 	skb = (struct sk_buff *) rxbuf;
 	while (skb) {
+		u16 rtap_len;
+
 		skb_next = skb->next;
+		/* A real capture must already carry radiotap from HTT parsing.
+		 * Do not synthesize headers around ordinary STA Ethernet packets.
+		 */
+		if (skb_headlen(skb) < 8 || skb->data[0] != 0)
+			goto bad_radiotap;
+		rtap_len = skb->data[2] | (skb->data[3] << 8);
+		if (rtap_len < 8 || rtap_len > skb->len ||
+		    skb->len - rtap_len < 10 ||
+		    rtap_len + 2 > skb_headlen(skb))
+			goto bad_radiotap;
 		skb->dev = adapter->dev;
+		skb->pkt_type = PACKET_OTHERHOST;
+		skb->protocol = htons(ETH_P_802_2);
+		skb_reset_mac_header(skb);
+		pr_info_ratelimited("VIFRX delivered if=%s vdev=%u bytes=%u fc=%02x/%02x\n",
+				    adapter->dev->name, adapter->vdev_id, skb->len,
+				    skb->data[rtap_len], skb->data[rtap_len + 1]);
 
 		++stats->per_cpu[cpu_index].rx_packets;
 		++adapter->stats.rx_packets;
@@ -1601,6 +1620,14 @@ QDF_STATUS hdd_mon_rx_packet_cbk(void *context, qdf_nbuf_t rxbuf)
 		else
 			++stats->per_cpu[cpu_index].rx_refused;
 
+		skb = skb_next;
+		continue;
+
+bad_radiotap:
+		pr_warn_ratelimited("VIFRX drop-invalid-radiotap if=%s bytes=%u\n",
+				    adapter->dev->name, skb->len);
+		++adapter->stats.rx_dropped;
+		qdf_nbuf_free(skb);
 		skb = skb_next;
 	}
 
@@ -3946,32 +3973,26 @@ int hdd_set_mon_rx_cb(struct net_device *dev)
 	qdf_mem_zero(&txrx_ops, sizeof(txrx_ops));
 	txrx_ops.rx.rx = hdd_mon_rx_packet_cbk;
 	hdd_monitor_set_rx_monitor_cb(&txrx_ops, hdd_rx_monitor_callback);
-	cdp_vdev_register(soc, adapter->vdev_id,
-			  (ol_osif_vdev_handle)adapter,
-			  &txrx_ops);
-	/* peer is created wma_vdev_attach->wma_create_peer */
-	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
-	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("cdp_peer_register() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
-		goto exit;
+	if (wlan_hdd_validate_vdev_id(adapter->vdev_id) || !adapter->vdev) {
+		hdd_err("VIFRX register-invalid-vdev if=%s vdev=%u",
+			adapter->dev->name, adapter->vdev_id);
+		return -ENODEV;
 	}
+	cdp_vdev_register(soc, adapter->vdev_id,
+			  (ol_osif_vdev_handle)adapter, &txrx_ops);
 
 	qdf_status = sme_create_mon_session(hdd_ctx->mac_handle,
 					    adapter->mac_addr.bytes,
 					    adapter->vdev_id);
-	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("sme_create_mon_session() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
-	}
-
-	/* peer is created wma_vdev_attach->wma_create_peer */
-	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
-	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("cdp_peer_register() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
+	hdd_warn("VIFRX session-create if=%s vdev=%u status=%d",
+		 adapter->dev->name, adapter->vdev_id, qdf_status);
+	if (QDF_IS_STATUS_ERROR(qdf_status))
 		goto exit;
-	}
+
+	/* Register exactly once, after creating the monitor session. */
+	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
+	hdd_warn("VIFRX peer-register if=%s vdev=%u status=%d",
+		 adapter->dev->name, adapter->vdev_id, qdf_status);
 
 exit:
 	ret = qdf_status_to_os_return(qdf_status);
