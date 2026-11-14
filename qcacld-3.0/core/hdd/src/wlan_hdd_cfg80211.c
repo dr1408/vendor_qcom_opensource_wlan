@@ -23524,6 +23524,20 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 	if (!adapter)
 		return -EIO;
 
+	if (wlan_hdd_validate_vdev_id(adapter->vdev_id) || !adapter->vdev ||
+	    !test_bit(SME_SESSION_OPENED, &adapter->event_flags) ||
+	    !test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags)) {
+		hdd_err("VIFRX channel-invalid-session if=%s vdev=%u opened=%u session=%u freq=%u",
+			adapter->dev->name, adapter->vdev_id,
+			!!test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags),
+			!!test_bit(SME_SESSION_OPENED, &adapter->event_flags),
+			chandef->chan->center_freq);
+		return -ENETDOWN;
+	}
+	hdd_warn("VIFRX channel-request if=%s vdev=%u freq=%u width=%u",
+		 adapter->dev->name, adapter->vdev_id,
+		 chandef->chan->center_freq, chandef->width);
+
 	hdd_debug("%s: set monitor mode freq %d",
 		  adapter->dev->name, chandef->chan->center_freq);
 
@@ -23677,6 +23691,9 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 		return qdf_status_to_os_return(status);
 	}
 
+	hdd_warn("VIFRX channel-complete if=%s vdev=%u freq=%u status=%d",
+		 adapter->dev->name, adapter->vdev_id,
+		 chandef->chan->center_freq, status);
 	adapter->mon_chan_freq = chandef->chan->center_freq;
 	adapter->mon_bandwidth = ch_width;
 

@@ -800,7 +800,8 @@ static void ol_tx_flow_pool_vdev_map(struct ol_tx_flow_pool_t *pool,
 
 	vdev = (struct ol_txrx_vdev_t *)ol_txrx_get_vdev_from_vdev_id(vdev_id);
 	if (!vdev) {
-		ol_txrx_err("invalid vdev_id %d", vdev_id);
+		ol_txrx_err("VIFRX flow-map missing host DP vdev=%u (firmware-only helper possible)",
+			    vdev_id);
 		return;
 	}
 

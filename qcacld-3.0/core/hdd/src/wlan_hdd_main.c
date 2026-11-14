@@ -9044,6 +9044,14 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 	enum phy_ch_width ch_width;
 	int ret;
 
+	if (wlan_hdd_validate_vdev_id(adapter->vdev_id) || !adapter->vdev ||
+	    !test_bit(SME_SESSION_OPENED, &adapter->event_flags) ||
+	    !test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags)) {
+		hdd_err("VIFRX wext-channel-invalid-session if=%s vdev=%u freq=%u",
+			adapter->dev->name, adapter->vdev_id, freq);
+		return -ENETDOWN;
+	}
+
 	if ((hdd_get_conparam() != QDF_GLOBAL_MONITOR_MODE) &&
 	    (!policy_mgr_is_sta_mon_concurrency(hdd_ctx->psoc))) {
 		hdd_err("Not supported, device is not in monitor mode");
@@ -9137,9 +9145,6 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 		return qdf_status_to_os_return(status);
 	}
 
-	adapter->mon_chan_freq = freq;
-	adapter->mon_bandwidth = bandwidth;
-
 	/* block on a completion variable until vdev up success*/
 	status = qdf_wait_for_event_completion(
 				       &adapter->qdf_monitor_mode_vdev_up_event,
@@ -9162,6 +9167,12 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 		adapter->monitor_mode_vdev_up_in_progress = false;
 	}
 
+	if (QDF_IS_STATUS_SUCCESS(status)) {
+		adapter->mon_chan_freq = freq;
+		adapter->mon_bandwidth = bandwidth;
+	}
+	hdd_warn("VIFRX wext-channel-complete if=%s vdev=%u freq=%u status=%d",
+		 adapter->dev->name, adapter->vdev_id, freq, status);
 	return qdf_status_to_os_return(status);
 }
 #endif
