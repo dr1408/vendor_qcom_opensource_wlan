@@ -668,6 +668,39 @@ static void wma_injection_reset_session_state(void)
 	 */
 }
 
+/* Select a distinct local unicast MAC before creating the firmware helper.
+ * The monitor commonly already has the local bit set, so OR alone is not
+ * sufficient. Check all object-backed vdevs; this helper is the sole
+ * firmware-only injection vdev and is destroyed before this allocation.
+ */
+static QDF_STATUS
+wma_injection_select_helper_mac(tp_wma_handle wma, const uint8_t *mon_mac,
+                                uint8_t *mac)
+{
+	unsigned int attempt, j;
+	uint8_t *other;
+	bool collision;
+
+	qdf_mem_copy(mac, mon_mac, QDF_MAC_ADDR_SIZE);
+	mac[0] = (mac[0] | 0x02) & 0xfe;
+	for (attempt = 0; attempt < 256; attempt++) {
+		/* Try every last-octet value, starting after the monitor MAC. */
+		mac[QDF_MAC_ADDR_SIZE - 1]++;
+		collision = !qdf_mem_cmp(mac, mon_mac, QDF_MAC_ADDR_SIZE);
+		for (j = 0; !collision && j < wma->max_bssid; j++) {
+			if (!wma->interfaces[j].vdev)
+				continue;
+			other = wlan_vdev_mlme_get_macaddr(wma->interfaces[j].vdev);
+			if (!other || !qdf_mem_cmp(mac, other, QDF_MAC_ADDR_SIZE))
+				collision = true;
+		}
+		if (!collision)
+			return QDF_STATUS_SUCCESS;
+	}
+	wma_err("VIFDIAG injection helper MAC allocation exhausted");
+	return QDF_STATUS_E_RESOURCES;
+}
+
 /**
  * wma_injection_ensure_tx_vdev() - Ensure hidden STA vdev exists for TX
  * @wma: WMA handle
@@ -833,8 +866,11 @@ restart_failed:
 		wma_err("Injection: cannot read monitor vdev MAC");
 		return QDF_STATUS_E_FAILURE;
 	}
-	qdf_mem_copy(inj_mac, mon_mac, QDF_MAC_ADDR_SIZE);
-	inj_mac[0] |= 0x02; /* locally-administered */
+	status = wma_injection_select_helper_mac(wma, mon_mac, inj_mac);
+	if (QDF_IS_STATUS_ERROR(status))
+		return status;
+	wma_info("VIFDIAG injection helper MAC monitor=%pM helper=%pM vdev=%u",
+		 mon_mac, inj_mac, vid);
 
 	/* ---------- 1. VDEV CREATE (STA type) ---------- */
 	/*
