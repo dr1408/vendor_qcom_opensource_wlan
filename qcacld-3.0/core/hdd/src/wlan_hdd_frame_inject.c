@@ -502,13 +502,13 @@ QDF_STATUS hdd_process_frame_injection(struct hdd_adapter *adapter,
 	QDF_STATUS status;
 	uint8_t frame_type;
 
-	hdd_inject_debug("Processing frame injection: session_id=%u, len=%u",
-			 req->session_id, req->frame_len);
-
 	if (!adapter || !adapter->injection_ctx || !req) {
 		hdd_inject_err("Invalid parameters");
 		return QDF_STATUS_E_INVAL;
 	}
+
+	hdd_inject_debug("Processing frame injection: session_id=%u, len=%u",
+			 req->session_id, req->frame_len);
 
 	/* Check global enable flag */
 	if (!hdd_injection_is_globally_enabled()) {

@@ -117,6 +117,13 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	if (vdev_id == (uint8_t)-EINVAL)
 		return -EINVAL;
 
+	/* Do not configure another adapter during monitor teardown/recreation. */
+	if (vdev_id != adapter->vdev_id) {
+		hdd_warn("VIFDIAG monitor ownership mismatch if=%s adapter_vdev=%u monitor_vdev=%u",
+			 dev->name, adapter->vdev_id, vdev_id);
+		return -EINVAL;
+	}
+
 	ret = cdp_set_monitor_mode(soc, vdev_id, false);
 	hdd_warn("VIFDIAG monitor CDP request vdev=%u status=%d (not RX validation)",
 		 vdev_id, ret);

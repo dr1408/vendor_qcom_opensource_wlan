@@ -70,7 +70,7 @@ struct injection_session {
  */
 static uint64_t hdd_get_current_time_ms(void)
 {
-	return qdf_get_log_timestamp();
+	return qdf_get_monotonic_boottime() / 1000;
 }
 
 /**
