@@ -201,4 +201,19 @@ void wlan_hdd_set_mcc_latency(struct hdd_adapter *adapter, int set_value);
  * Return: None
  */
 void wlan_hdd_cleanup_actionframe(struct hdd_adapter *adapter);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+QDF_STATUS hdd_monitor_restore_work_init(struct hdd_context *hdd_ctx);
+void hdd_monitor_restore_work_deinit(struct hdd_context *hdd_ctx);
+#else
+static inline QDF_STATUS
+hdd_monitor_restore_work_init(struct hdd_context *hdd_ctx)
+{
+	return QDF_STATUS_SUCCESS;
+}
+static inline void
+hdd_monitor_restore_work_deinit(struct hdd_context *hdd_ctx)
+{
+}
+#endif
+
 #endif /* __P2P_H */

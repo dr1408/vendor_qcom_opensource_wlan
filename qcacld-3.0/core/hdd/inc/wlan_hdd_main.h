@@ -2371,6 +2371,12 @@ struct hdd_context {
 	} dp_agg_param;
 	int current_pcie_gen_speed;
 	qdf_workqueue_t *adapter_ops_wq;
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	qdf_work_t monitor_restore_work;
+	enum hdd_work_status monitor_restore_work_status;
+	char monitor_restore_iface[IFNAMSIZ];
+	bool monitor_restore_pending;
+#endif
 	struct hdd_adapter_ops_history adapter_ops_history;
 	bool ll_stats_per_chan_rx_tx_time;
 #ifdef FEATURE_CLUB_LL_STATS_AND_GET_STATION

@@ -2032,8 +2032,16 @@ ol_txrx_vdev_attach(struct cdp_soc_t *soc_hdl, uint8_t pdev_id,
 
 	/* add this vdev into the pdev's list */
 	TAILQ_INSERT_TAIL(&pdev->vdev_list, vdev, vdev_list_elem);
-	if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam())
+	/* Concurrent monitor VDEVs do not change the global con_mode. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (op_mode == wlan_op_mode_monitor ||
+	    QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()) {
 		pdev->monitor_vdev = vdev;
+		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_WARN,
+			  "VIFDIAG OL monitor attach pdev=%u vdev=%u opmode=%u con_mode=%u",
+			  pdev_id, vdev_id, op_mode, cds_get_conparam());
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 
 	ol_txrx_hl_tdls_flag_reset(soc_hdl, vdev_id, false);
 
@@ -2090,6 +2098,12 @@ static QDF_STATUS ol_txrx_vdev_register(struct cdp_soc_t *soc_hdl,
 	vdev->rx = txrx_ops->rx.rx;
 	vdev->stats_rx = txrx_ops->rx.stats_rx;
 	vdev->tx_comp = txrx_ops->tx.tx_comp;
+	if (vdev->opmode == wlan_op_mode_monitor ||
+	    QDF_GLOBAL_MONITOR_MODE == cds_get_conparam())
+		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_WARN,
+			  "VIFDIAG OL monitor rx-register vdev=%u rx_cb=%u mon_cb=%u self_peer=%u con_mode=%u",
+			  vdev_id, !!txrx_ops->rx.rx, !!txrx_ops->rx.mon,
+			  !!vdev->pdev->self_peer, cds_get_conparam());
 	txrx_ops->tx.tx = ol_tx_data;
 
 	return QDF_STATUS_SUCCESS;
@@ -2207,6 +2221,16 @@ ol_txrx_vdev_detach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 
 	/* prevent anyone from restarting the ll_pause timer again */
 	qdf_atomic_set(&vdev->delete.detaching, 1);
+
+	/* Unpublish before either immediate or peer-deferred destruction. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (pdev->monitor_vdev == vdev) {
+		pdev->monitor_vdev = NULL;
+		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_WARN,
+			  "VIFDIAG OL monitor detach vdev=%u pointer-cleared",
+			  vdev_id);
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 
 	ol_txrx_vdev_tx_queue_free(vdev);
 
@@ -5695,12 +5719,27 @@ uint8_t ol_txrx_get_mon_vdev_from_pdev(struct cdp_soc_t *soc_hdl,
 				       uint8_t pdev_id)
 {
 	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
-	ol_txrx_pdev_handle pdev = ol_txrx_get_pdev_from_pdev_id(soc, pdev_id);
+	ol_txrx_pdev_handle pdev;
+	uint8_t vdev_id = (uint8_t)-EINVAL;
 
+	if (qdf_unlikely(!soc))
+		return vdev_id;
+	pdev = ol_txrx_get_pdev_from_pdev_id(soc, pdev_id);
 	if (qdf_unlikely(!pdev))
-		return -EINVAL;
+		return vdev_id;
 
-	return pdev->monitor_vdev->vdev_id;
+	/* Serialize the pointer dereference with attach and detach. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (pdev->monitor_vdev)
+		vdev_id = pdev->monitor_vdev->vdev_id;
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+
+	if (vdev_id == (uint8_t)-EINVAL)
+		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_WARN,
+			  "VIFDIAG OL monitor lookup missing pdev=%u con_mode=%u",
+			  pdev_id, cds_get_conparam());
+
+	return vdev_id;
 }
 
 /**

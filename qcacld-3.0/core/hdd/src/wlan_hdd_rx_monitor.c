@@ -104,17 +104,22 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
 	uint8_t vdev_id;
 	int ret;
-#ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
-#endif
 
 	hdd_enter_dev(dev);
 
+	if (!soc || !adapter)
+		return -EINVAL;
+	hdd_warn("VIFDIAG monitor lookup if=%s adapter_vdev=%u",
+		 dev->name, adapter->vdev_id);
 	vdev_id = cdp_get_mon_vdev_from_pdev(soc, OL_TXRX_PDEV_ID);
-	if (vdev_id < 0)
+	/* The CDP error sentinel is carried through an unsigned u8 API. */
+	if (vdev_id == (uint8_t)-EINVAL)
 		return -EINVAL;
 
 	ret = cdp_set_monitor_mode(soc, vdev_id, false);
+	hdd_warn("VIFDIAG monitor CDP request vdev=%u status=%d (not RX validation)",
+		 vdev_id, ret);
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	/* Enable frame injection when monitor mode is enabled */
@@ -141,17 +146,13 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 int hdd_disable_monitor_mode(struct net_device *dev)
 {
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
-	int vdev_id;
+	uint8_t vdev_id;
 	int ret;
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 #endif
 
 	hdd_enter_dev(dev);
-
-	vdev_id = cdp_get_mon_vdev_from_pdev(soc, OL_TXRX_PDEV_ID);
-	if (vdev_id < 0)
-		return -EINVAL;
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	/* Disable frame injection when monitor mode is disabled */
@@ -163,7 +164,13 @@ int hdd_disable_monitor_mode(struct net_device *dev)
 	}
 #endif
 
+	if (!soc)
+		return -EINVAL;
+	vdev_id = cdp_get_mon_vdev_from_pdev(soc, OL_TXRX_PDEV_ID);
+	if (vdev_id == (uint8_t)-EINVAL)
+		return -EINVAL;
 	ret = cdp_reset_monitor_mode(soc, OL_TXRX_PDEV_ID, false);
+	hdd_warn("VIFDIAG monitor reset vdev=%u status=%d", vdev_id, ret);
 
 	return ret;
 }
