@@ -3837,6 +3837,7 @@ static int wma_mgmt_rx_process(void *handle, uint8_t *data,
 	uint8_t *bufp;
 	qdf_nbuf_t wbuf;
 	QDF_STATUS status;
+	uint32_t event_target_pdev = WMI_HOST_PDEV_ID_INVALID;
 
 	if (wma_validate_handle(wma_handle))
 		return -EINVAL;
@@ -3924,12 +3925,18 @@ static int wma_mgmt_rx_process(void *handle, uint8_t *data,
 		return -EINVAL;
 	}
 
-	/* Initial OL bridge is single-pdev only. Never relabel another radio's
-	 * event as pdev0 just because the legacy consumer does so below.
+	/* The extractor returned a WMI host-namespace radio ID, NOT an OL
+	 * datapath index. Undo that conversion for the receiving-MAC check,
+	 * just as the Onyx bridge does. MCL conversion may be identity.
+	 * Conversion failure only rejects the optional copy, never normal RX.
 	 */
+	if (QDF_IS_STATUS_ERROR(wmi_convert_pdev_id_host_to_target(
+			wma_handle->wmi_handle, mgmt_rx_params->pdev_id,
+			&event_target_pdev)))
+		event_target_pdev = WMI_HOST_PDEV_ID_INVALID;
 	ol_monitor_mgmt_rx(cds_get_context(QDF_MODULE_ID_SOC), wbuf,
 		mgmt_rx_params->chan_freq, mgmt_rx_params->rssi,
-		mgmt_rx_params->status, mgmt_rx_params->pdev_id);
+		mgmt_rx_params->status, event_target_pdev);
 	mgmt_rx_params->pdev_id = 0;
 	status = mgmt_txrx_rx_handler(psoc, wbuf, mgmt_rx_params);
 	if (status != QDF_STATUS_SUCCESS) {
