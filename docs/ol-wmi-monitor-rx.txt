@@ -23,7 +23,10 @@ Lifecycle/ownership:
   it with an arbitrary callback without auditing that contract/lock order.
 - WMI original frame and params are untouched. Legacy mgmt_txrx processing
   still receives the original after the synchronous copy. Extracted pdev id is
-  checked BEFORE legacy code normalizes it; only host pdev0 accepted initially.
+  converted back to target namespace BEFORE legacy normalization. Target radio
+  must match WMA_MAC_TO_PDEV_MAP(active_monitor->mac_id). The OL object is
+  separately looked up as OL_TXRX_PDEV_ID=0; that is NOT the event radio ID.
+  Changing monitor MAC invalidates readiness/epoch until channel is republished.
 - Frequency check rejects background/offchannel scan frames. It does not
   establish the originating firmware generation for previously queued events;
   epoch checks protect host lifecycle/copy races, not firmware timestamp proof.
@@ -60,7 +63,7 @@ management events during scanning, delivery may be sparse; this bridge cannot
 create continuous promiscuous reception that firmware is not supplying.
 
 Validation performed:
-- Source-extracted exact set-channel/RX functions:33 host shim cases, UBSan+
+- Source-extracted exact set-channel/RX functions:38 host bridge cases plus6 WMA conversion cases, UBSan+
   bounds, including malformed frames, nulls, channels/pdevs, global exclusion,
   allocation failure, teardown/generation changes and callback failure.
 - Exact public header syntax checked for feature off, OL feature on, Lithium
@@ -70,3 +73,12 @@ Not performed: full kernel/module compilation, lockdep, firmware/on-air or
 userspace airodump validation. ASan executable could not run on host because
 its shadow mapping failed; no ASan pass claimed. Tests remain local in
 /tmp/creek-wmi-monitor-tests, not shipped in driver tree.
+
+Radio-ID correction after first device test:
+The first build incorrectly compared extracted event ID1 against OL DP ID0;
+it rejected1085 events. This is an implementation bug, not firmware evidence.
+Now WMI host->target conversion precedes validation against active monitor MAC.
+No blind subtraction, no forced pdev0 relabel, no acceptance of other radios.
+Conversion failure/unknown ID rejects only the optional copy; normal RX remains.
+The initial no-disruption aireplay observation is independent of capture success;
+no OTA capture in that run establishes absence/cause of prior disruptive frames.

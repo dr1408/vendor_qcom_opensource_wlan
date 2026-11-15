@@ -4827,7 +4827,15 @@ static void ol_txrx_update_mac_id(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 			  "%s: Invalid vdev_id %d", __func__, vdev_id);
 		return;
 	}
+	qdf_spin_lock_bh(&vdev->pdev->peer_ref_mutex);
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+	if (vdev->opmode == wlan_op_mode_monitor && vdev->mac_id != mac_id) {
+		vdev->monitor_mgmt_frequency = 0;
+		vdev->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
+	}
+#endif
 	vdev->mac_id = mac_id;
+	qdf_spin_unlock_bh(&vdev->pdev->peer_ref_mutex);
 }
 
 /**
@@ -5782,8 +5790,10 @@ void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc_hdl, uint8_t id,
 	if (mon && mon->vdev_id == id && mon->opmode == wlan_op_mode_monitor) {
 		mon->monitor_mgmt_frequency = frequency;
 		mon->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
-		pr_info_ratelimited("VIFMGMT state vdev=%u freq=%u generation=%llu enabled=%u\n",
-			id, frequency, (unsigned long long)mon->monitor_mgmt_generation,
+		pr_info_ratelimited("VIFMGMT state vdev=%u mac=%u target=%u dp_pdev=%u freq=%u generation=%llu enabled=%u\n",
+			id, mon->mac_id, WMA_MAC_TO_PDEV_MAP(mon->mac_id),
+			OL_TXRX_PDEV_ID, frequency,
+			(unsigned long long)mon->monitor_mgmt_generation,
 			ol_monitor_wmi_rx);
 	}
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
@@ -5796,7 +5806,7 @@ void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc_hdl, uint8_t id,
  */
 void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
                         uint32_t frequency, int32_t rssi, uint8_t status,
-                        uint32_t event_pdev_id)
+                        uint32_t event_target_pdev)
 {
 	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
 	struct ol_txrx_pdev_t *pdev;
@@ -5804,7 +5814,7 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 	qdf_nbuf_t copy;
 	uint64_t generation;
 	uint32_t length, rtlen, hdrlen;
-	uint8_t id, *data, *rt;
+	uint8_t id, mac_id, *data, *rt;
 	bool has_rssi = rssi >= -128 && rssi < 0;
 	const char *reason = "no-monitor";
 
@@ -5813,12 +5823,6 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 	atomic64_inc(&ol_monitor_wmi_seen);
 	if (!soc || !frame) {
 		atomic64_inc(&ol_monitor_wmi_dropped);
-		return;
-	}
-	if (event_pdev_id != OL_TXRX_PDEV_ID) {
-		atomic64_inc(&ol_monitor_wmi_dropped);
-		pr_info_ratelimited("VIFMGMT drop=pdev event=%u expected=%u\n",
-			event_pdev_id, OL_TXRX_PDEV_ID);
 		return;
 	}
 	length = qdf_nbuf_len(frame);
@@ -5854,8 +5858,24 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 		reason = "channel-or-not-ready";
 		goto unlock_drop;
 	}
+	/* OL pdev lookup above stays in its own namespace. The WMI event
+	 * identifies the receiving MAC as a target PDEV (MAC index + 1).
+	 */
+	if (mon->mac_id >= MAX_MAC) {
+		reason = "invalid-monitor-mac";
+		goto unlock_drop;
+	}
+	if (event_target_pdev != WMA_MAC_TO_PDEV_MAP(mon->mac_id)) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=pdev target=%u expected=%u mac=%u dp_pdev=%u fc=%02x len=%u\n",
+			event_target_pdev, WMA_MAC_TO_PDEV_MAP(mon->mac_id),
+			mon->mac_id, OL_TXRX_PDEV_ID, data[0], length);
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		return;
+	}
 	generation = mon->monitor_mgmt_generation;
 	id = mon->vdev_id;
+	mac_id = mon->mac_id;
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 
 	/* FLAGS, aligned CHANNEL, optional signed dBm RSSI. No invented TSF/FCS. */
@@ -5887,7 +5907,7 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 	mon = pdev->monitor_vdev;
 	if (!mon || mon->vdev_id != id || mon->opmode != wlan_op_mode_monitor ||
 	    mon->monitor_mgmt_generation != generation ||
-	    mon->monitor_mgmt_frequency != frequency ||
+	    mon->monitor_mgmt_frequency != frequency || mon->mac_id != mac_id ||
 	    qdf_atomic_read(&mon->delete.detaching) || !mon->rx || !mon->osif_dev) {
 		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 		qdf_nbuf_free(copy);
@@ -5908,8 +5928,9 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 	}
 	atomic64_inc(&ol_monitor_wmi_delivered);
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
-	pr_info_ratelimited("VIFMGMT delivered vdev=%u freq=%u fc=%02x len=%u generation=%llu\n",
-		id, frequency, data[0], length, (unsigned long long)generation);
+	pr_info_ratelimited("VIFMGMT delivered vdev=%u mac=%u target=%u dp_pdev=%u freq=%u fc=%02x len=%u generation=%llu\n",
+		id, mac_id, event_target_pdev, OL_TXRX_PDEV_ID, frequency,
+		data[0], length, (unsigned long long)generation);
 	return;
 
 unlock_drop:

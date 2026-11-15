@@ -14,7 +14,7 @@ void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc, uint8_t vdev_id,
                                 uint32_t frequency);
 void ol_monitor_mgmt_rx(struct cdp_soc_t *soc, qdf_nbuf_t frame,
                         uint32_t frequency, int32_t rssi, uint8_t status,
-                        uint32_t event_pdev_id);
+                        uint32_t event_target_pdev);
 #else
 static inline void
 ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc, uint8_t vdev_id,
@@ -24,7 +24,7 @@ ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc, uint8_t vdev_id,
 static inline void
 ol_monitor_mgmt_rx(struct cdp_soc_t *soc, qdf_nbuf_t frame,
                    uint32_t frequency, int32_t rssi, uint8_t status,
-                        uint32_t event_pdev_id)
+                        uint32_t event_target_pdev)
 {
 }
 #endif
