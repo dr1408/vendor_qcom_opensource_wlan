@@ -26,6 +26,7 @@
 #include <cds_utils.h>
 #include "wlan_hdd_rx_monitor.h"
 #include "ol_txrx.h"
+#include "ol_monitor_mgmt.h"
 #include "cdp_txrx_mon.h"
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 #include "wlan_hdd_frame_inject.h"
@@ -60,6 +61,9 @@ void hdd_rx_monitor_callback(ol_osif_vdev_handle context,
 	while (skb) {
 		skb_next = skb->next;
 		skb->dev = adapter->dev;
+		skb->pkt_type = PACKET_OTHERHOST;
+		skb->protocol = htons(ETH_P_802_2);
+		skb_reset_mac_header(skb);
 
 		++stats->per_cpu[cpu_index].rx_packets;
 		++adapter->stats.rx_packets;
@@ -155,12 +159,13 @@ int hdd_disable_monitor_mode(struct net_device *dev)
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
 	uint8_t vdev_id;
 	int ret;
-#ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
-#endif
 
 	hdd_enter_dev(dev);
 
+	/* Serialize capture shutdown with callback delivery before freeing adapter. */
+	if (adapter)
+		ol_monitor_mgmt_set_channel(soc, adapter->vdev_id, 0);
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	/* Disable frame injection when monitor mode is disabled */
 	if (adapter) {

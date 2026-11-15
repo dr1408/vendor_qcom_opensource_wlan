@@ -1192,6 +1192,11 @@ struct ol_txrx_vdev_t {
 				      * to the target
 				      */
 	void *osif_dev;
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+	/* Protected by pdev->peer_ref_mutex; zero means not capture-ready. */
+	uint32_t monitor_mgmt_frequency;
+	uint64_t monitor_mgmt_generation;
+#endif
 
 	void *ctrl_vdev; /* vdev objmgr handle */
 

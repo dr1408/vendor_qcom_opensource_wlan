@@ -1,0 +1,72 @@
+Experimental OL WMI management RX bridge
+========================================
+Scope: actual WMI management MPDU copies to the existing OL rx.rx monitor
+callback. Not Ethernet reconstruction, not full raw data/control RX, not TX.
+Reference: Onyx 9e3c693d7d4f8e626dab27e798977b888480f895 wma_sta_mon_mgmt_rx
+and dp_mon_sta_coex_mgmt_rx, adapted to OL ownership rather than Wi-Fi3 rings.
+
+Opt in at wlan module load with ol_monitor_wmi_rx=1 (default0, readonly).
+No module was loaded, installed, replaced or pushed as part of this change.
+Global con_mode4 is excluded even when enabled; working HTT global capture is
+not mirrored. Wi-Fi3 CONFIG_LITHIUM/CONFIG_BERYLLIUM builds use no-op stubs.
+
+Lifecycle/ownership:
+- New monitor attach and callback registration invalidate capture readiness.
+- Successful cfg80211 monitor-channel completion publishes frequency+epoch.
+- Before retune and monitor disable, frequency cleared and epoch advanced.
+- Detach unpublishes monitor under the same peer_ref_mutex used for delivery.
+- RX snapshots identity+epoch before allocation; revalidates after allocation.
+- Lock held through non-sleeping HDD enqueue so osif_dev cannot be detached
+  between final validation and handoff. This relies on the existing
+  hdd_mon_rx_packet_cbk contract: consumes on success, validation failure does
+  not consume, must not sleep or reenter OL under peer_ref_mutex. Do not replace
+  it with an arbitrary callback without auditing that contract/lock order.
+- WMI original frame and params are untouched. Legacy mgmt_txrx processing
+  still receives the original after the synchronous copy. Extracted pdev id is
+  checked BEFORE legacy code normalizes it; only host pdev0 accepted initially.
+- Frequency check rejects background/offchannel scan frames. It does not
+  establish the originating firmware generation for previously queued events;
+  epoch checks protect host lifecycle/copy races, not firmware timestamp proof.
+- Packet bounds24..4096, protocol/type, HTControl and beacon/probe-response
+  fixed body validated. Radiotap reports channel, optional valid RSSI, flags0;
+  does not invent TSF, captured FCS, modulation, sequence or addresses.
+
+Diagnostics:
+  VIFMGMT state ... freq=0 means disabled/transitioning.
+  VIFMGMT delivered ... means handed to HDD, not proof userspace received it.
+  VIFMGMT drop=event/header/pdev/channel-or-not-ready/no-monitor/allocation/
+               stale-generation/callback/no-pdev
+Lines are rate-limited. Read exact module-lifetime counters from
+/sys/module/wlan/parameters/ol_monitor_wmi_{seen,delivered,dropped}.
+seen counts calls admitted by opt-in+non-global guard; delivered counts successful
+HDD handoffs, dropped counts bridge rejections. Compare deltas, not absolutes.
+No events counted when disabled/global. Extraction failures before the bridge
+remain normal WMI diagnostics. Zero seen while enabled suggests absent eligible
+WMI events or wrong loaded build, not automatically a radiotap/parser problem.
+
+Audit fixes included:
+- Offload indications no longer selected by the experimental OL raw parser;
+  retain normal offload dispatch (unknown peer alone is not raw-format proof).
+- Alternate monitor callback sets pkt_type, protocol and mac_header.
+- Correct dormant control subtype constants without enabling data/control TX.
+
+Intentionally NOT silently changed:
+- STA_SCAN_MON forced disconnect and reconnect policy; interface combinations.
+- Missing radiotap TX-frequency transport, synthetic STA RX fallback.
+- Helper DMA timeout reclamation, retry bound, in-place mode conversion.
+These are separate changes; this bridge does not claim full STA/AP concurrency.
+No new firmware filters or scan traffic are generated. If firmware only sends
+management events during scanning, delivery may be sparse; this bridge cannot
+create continuous promiscuous reception that firmware is not supplying.
+
+Validation performed:
+- Source-extracted exact set-channel/RX functions:33 host shim cases, UBSan+
+  bounds, including malformed frames, nulls, channels/pdevs, global exclusion,
+  allocation failure, teardown/generation changes and callback failure.
+- Exact public header syntax checked for feature off, OL feature on, Lithium
+  and Beryllium stub builds. Ownership/order/offload/channel wiring assertions.
+- git diff --check.
+Not performed: full kernel/module compilation, lockdep, firmware/on-air or
+userspace airodump validation. ASan executable could not run on host because
+its shadow mapping failed; no ASan pass claimed. Tests remain local in
+/tmp/creek-wmi-monitor-tests, not shipped in driver tree.

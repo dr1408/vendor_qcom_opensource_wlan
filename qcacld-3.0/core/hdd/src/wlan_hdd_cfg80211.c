@@ -50,6 +50,7 @@
 #include "wlan_hdd_hostapd.h"
 #include "wlan_hdd_softap_tx_rx.h"
 #include "wlan_hdd_main.h"
+#include "ol_monitor_mgmt.h"
 #include "wlan_hdd_power.h"
 #include "wlan_hdd_trace.h"
 #include "wlan_hdd_tx_rx.h"
@@ -23600,6 +23601,10 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 		return -EBUSY;
 	}
 
+	/* Stop capture across retune/failure; stale scan events must not leak. */
+	ol_monitor_mgmt_set_channel(cds_get_context(QDF_MODULE_ID_SOC),
+				    adapter->vdev_id, 0);
+
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	injection_wma = cds_get_context(QDF_MODULE_ID_WMA);
 	if (injection_wma) {
@@ -23696,6 +23701,8 @@ static int __wlan_hdd_cfg80211_set_mon_ch(struct wiphy *wiphy,
 		 chandef->chan->center_freq, status);
 	adapter->mon_chan_freq = chandef->chan->center_freq;
 	adapter->mon_bandwidth = ch_width;
+	ol_monitor_mgmt_set_channel(cds_get_context(QDF_MODULE_ID_SOC),
+				    adapter->vdev_id, adapter->mon_chan_freq);
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	if (injection_transition)

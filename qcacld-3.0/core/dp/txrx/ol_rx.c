@@ -1606,7 +1606,9 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 				pr_info_ratelimited("VIFRX classify peer_id=%u known_peer=%u self_match=%u monitor_vdev=%u offload=%u\n",
 					peer_id, !!peer, peer == mon_peer,
 					pdev->monitor_vdev->vdev_id, is_offload);
-			mon_candidate = pdev->monitor_vdev &&
+			if (is_offload && pdev->monitor_vdev && (!peer || peer == mon_peer))
+				pr_info_ratelimited("VIFRX offload-indication parser=normal peer_id=%u\n", peer_id);
+			mon_candidate = !is_offload && pdev->monitor_vdev &&
 				(!peer || peer == mon_peer);
 			if (mon_candidate && mon_peer && mon_peer->valid &&
 			    mon_peer->vdev == pdev->monitor_vdev &&

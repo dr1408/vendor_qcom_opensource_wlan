@@ -26,6 +26,7 @@
 /* Header files */
 
 #include "wma.h"
+#include "ol_monitor_mgmt.h"
 #include "wma_api.h"
 #include "cds_api.h"
 #include "wmi_unified_api.h"
@@ -3873,7 +3874,7 @@ static int wma_mgmt_rx_process(void *handle, uint8_t *data,
 					    mgmt_rx_params->channel);
 	}
 
-	mgmt_rx_params->pdev_id = 0;
+	/* Keep extracted pdev_id until the optional capture copy is made. */
 	mgmt_rx_params->rx_params = NULL;
 
 	/*
@@ -3923,6 +3924,13 @@ static int wma_mgmt_rx_process(void *handle, uint8_t *data,
 		return -EINVAL;
 	}
 
+	/* Initial OL bridge is single-pdev only. Never relabel another radio's
+	 * event as pdev0 just because the legacy consumer does so below.
+	 */
+	ol_monitor_mgmt_rx(cds_get_context(QDF_MODULE_ID_SOC), wbuf,
+		mgmt_rx_params->chan_freq, mgmt_rx_params->rssi,
+		mgmt_rx_params->status, mgmt_rx_params->pdev_id);
+	mgmt_rx_params->pdev_id = 0;
 	status = mgmt_txrx_rx_handler(psoc, wbuf, mgmt_rx_params);
 	if (status != QDF_STATUS_SUCCESS) {
 		qdf_mem_free(mgmt_rx_params);

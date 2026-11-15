@@ -68,14 +68,14 @@
 #define HDD_MGMT_SUBTYPE_DEAUTH        0xc0
 #define HDD_MGMT_SUBTYPE_ACTION        0xd0
 
-/* Control frame subtypes */
-#define HDD_CTRL_SUBTYPE_RTS           0x40
-#define HDD_CTRL_SUBTYPE_CTS           0x50
-#define HDD_CTRL_SUBTYPE_ACK           0x60
-#define HDD_CTRL_SUBTYPE_CFEND         0x70
-#define HDD_CTRL_SUBTYPE_CFENDACK      0x80
-#define HDD_CTRL_SUBTYPE_BAR           0x90
-#define HDD_CTRL_SUBTYPE_BA            0xa0
+/* Control frame subtypes (FC0 high nibble, not a management subtype). */
+#define HDD_CTRL_SUBTYPE_BAR           0x80
+#define HDD_CTRL_SUBTYPE_BA            0x90
+#define HDD_CTRL_SUBTYPE_RTS           0xb0
+#define HDD_CTRL_SUBTYPE_CTS           0xc0
+#define HDD_CTRL_SUBTYPE_ACK           0xd0
+#define HDD_CTRL_SUBTYPE_CFEND         0xe0
+#define HDD_CTRL_SUBTYPE_CFENDACK      0xf0
 
 /* Data frame subtypes */
 #define HDD_DATA_SUBTYPE_DATA          0x00
