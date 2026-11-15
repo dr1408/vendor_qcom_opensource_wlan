@@ -24675,6 +24675,12 @@ static int __wlan_hdd_cfg80211_get_channel(struct wiphy *wiphy,
 			is_legacy_phymode = true;
 			break;
 		}
+	} else if (adapter->device_mode == QDF_MONITOR_MODE) {
+		/* Only report a channel after monitor bring-up has completed. */
+		if (!test_bit(DEVICE_IFACE_OPENED, &adapter->event_flags) ||
+		    adapter->monitor_mode_vdev_up_in_progress ||
+		    !adapter->mon_chan_freq)
+			return -ENODATA;
 	} else {
 		return -EINVAL;
 	}
@@ -24683,10 +24689,28 @@ static int __wlan_hdd_cfg80211_get_channel(struct wiphy *wiphy,
 	if (!vdev)
 		return -EINVAL;
 
+	if (!vdev->vdev_mlme.des_chan) {
+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
+		return -ENODATA;
+	}
+
 	chan_freq = vdev->vdev_mlme.des_chan->ch_freq;
+	/* A desired channel alone is not proof of a completed monitor tune. */
+	if (adapter->device_mode == QDF_MONITOR_MODE &&
+	    (chan_freq != adapter->mon_chan_freq ||
+	     vdev->vdev_mlme.des_chan->ch_width != adapter->mon_bandwidth)) {
+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
+		return -ENODATA;
+	}
 	chandef->center_freq1 = vdev->vdev_mlme.des_chan->ch_cfreq1;
 	chandef->center_freq2 = 0;
 	chandef->chan = ieee80211_get_channel(wiphy, chan_freq);
+	if (!chandef->chan) {
+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
+		return -EINVAL;
+	}
+	if (!chandef->center_freq1)
+		chandef->center_freq1 = chan_freq;
 
 	switch (vdev->vdev_mlme.des_chan->ch_width) {
 	case CH_WIDTH_20MHZ:
@@ -24722,6 +24746,11 @@ static int __wlan_hdd_cfg80211_get_channel(struct wiphy *wiphy,
 	}
 
 	wlan_hdd_set_chandef(vdev, chandef);
+	if (adapter->device_mode == QDF_MONITOR_MODE &&
+	    !cfg80211_chandef_valid(chandef)) {
+		hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
+		return -EINVAL;
+	}
 
 	hdd_objmgr_put_vdev_by_user(vdev, WLAN_OSIF_ID);
 	hdd_debug("primary_freq:%d, ch_width:%d, center_freq1:%d, center_freq2:%d",
