@@ -82,3 +82,43 @@ No blind subtraction, no forced pdev0 relabel, no acceptance of other radios.
 Conversion failure/unknown ID rejects only the optional copy; normal RX remains.
 The initial no-disruption aireplay observation is independent of capture success;
 no OTA capture in that run establishes absence/cause of prior disruptive frames.
+
+2026-11-15 RX crash audit (native-parser stabilization)
+-----------------------------------------------------
+Captured at uptime 623.483: unknown peer 39, offload=0, count=1 was
+explicitly routed into htt_rx_mon_amsdu_rx_in_order_pop_ll(), followed
+by an address-marking assertion in htt_rx_paddr_unmark_high_bits().
+The old %pK error can redact a nonzero DMA address: literal zero is
+NOT established. The truncated stack does not identify the first entry
+versus a continuation entry as the failing read.
+
+Onyx dp_rx_mon.c shared/unknown helpers run after native DMA unmapping
+and validate TLV/decapsulation/header/binding state before copying. Its
+Wi-Fi 3.0 descriptors cannot be used as OL descriptors. The examined
+Beryllium 659e3f3 ol_rx.c adds a self-peer fallback, not Creek's explicit
+per-indication monitor-parser override. Its synthesized STA Ethernet
+mirror is not evidence of real over-the-air raw handshake reception.
+
+Remove that override and peer substitution. Always use the parser
+selected by htt_rx_attach(). Global con_mode=4 retains its stock monitor
+parser; TX and WMI management-copy code are unchanged. Secondary-VIF
+unknown/self-monitor buffers are consumed/unmapped by native parsing,
+replenished and freed, not forwarded to STA or mislabelled as radiotap.
+THIS IS NOT A COMPLETE SECONDARY-VIF RAW DATA/EAPOL BRIDGE. Management
+capture remains available through WMI; raw data support remains pending.
+
+Rate-limited VIFRX diagnostics:
+- native-pop-enter: peer/TID, message length/count, header words,
+  offload argument versus header bit, fragment bit, first entry words.
+- malformed-native-indication: bounded non-offload envelope rejection.
+- native-pop-exit: status, consumed count, head/tail presence.
+- native-drop: consumed buffers reclaimed; no validated raw bridge.
+- bad-dma-marker: actual DMA high/low words, expected marker and width,
+  before the ORIGINAL assertion (not disabled).
+Snapshots are bounded and do not dump Wi-Fi payloads. If the native
+parser also asserts, compare raw entry words/flags and the new marker
+line; do not infer that the parser override was the sole defect.
+
+Host checks cover dispatch contracts/classification and bounded snapshot
+copying with UBSan/bounds. A full workflow build and device regression
+(global capture, normal injection, VIF management capture) are required.

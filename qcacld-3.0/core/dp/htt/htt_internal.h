@@ -1040,6 +1040,13 @@ htt_rx_paddr_unmark_high_bits(qdf_dma_addr_t paddr)
 		 * padded (with 0b0) to 8 bits
 		 */
 		if ((markings & 0xFFFF0000) != RX_PADDR_MAGIC_PATTERN) {
+			/* %pK below may redact the value to zero. Log the actual
+			 * descriptor words, not a kernel virtual pointer.
+			 */
+			pr_warn_ratelimited("VIFRX bad-dma-marker hi=%08x lo=%08x expected=%08x dma_bytes=%u\n",
+				(uint32_t)((paddr >> 16) >> 16),
+				(uint32_t)paddr, RX_PADDR_MAGIC_PATTERN,
+				(unsigned int)sizeof(qdf_dma_addr_t));
 			qdf_print("paddr not marked correctly: 0x%pK!\n",
 				  (void *)paddr);
 			HTT_ASSERT_ALWAYS(0);
