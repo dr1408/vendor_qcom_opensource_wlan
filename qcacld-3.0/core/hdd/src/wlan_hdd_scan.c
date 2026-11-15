@@ -1006,6 +1006,10 @@ static int __wlan_hdd_cfg80211_vendor_scan(struct wiphy *wiphy,
 	request = qdf_mem_malloc(len);
 	if (!request)
 		goto error;
+	/* Publish flexible-array capacity before any channels[] access.
+	 * The final count below excludes disabled channels.
+	 */
+	request->n_channels = n_channels;
 	if (n_ssid)
 		request->ssids = (void *)&request->channels[n_channels];
 	request->n_ssids = n_ssid;
