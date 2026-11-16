@@ -2248,8 +2248,9 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		adapter->injection_ctx->is_monitor_mode = true;
 	}
 
-	pr_info_ratelimited("VIFTRACE stage=netdev-input if=%s vdev=%u len=%u\n",
-			    dev->name, adapter->vdev_id, skb->len);
+	pr_info_ratelimited("VIFTRACE stage=netdev-input if=%s vdev=%u len=%u protocol=0x%04x devtype=%u\n",
+			    dev->name, adapter->vdev_id, skb->len,
+			    ntohs(skb->protocol), dev->type);
 
 	if (skb->len < 10) {
 		hdd_err_rl("monitor tx: invalid skb len %u", skb->len);

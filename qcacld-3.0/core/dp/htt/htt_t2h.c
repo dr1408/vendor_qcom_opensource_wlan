@@ -27,6 +27,9 @@
  *      based on the HTT message type.
  *  2.  functions that provide the info elements from specific HTT messages.
  */
+#include <linux/atomic.h>
+#include <linux/moduleparam.h>
+#include <linux/printk.h>
 #include <wma.h>
 #include <htc_api.h>            /* HTC_PACKET */
 #include <htt.h>                /* HTT_T2H_MSG_TYPE, etc. */
@@ -47,6 +50,64 @@
 #include <cdp_txrx_handle.h>
 #include <wlan_pkt_capture_ucfg_api.h>
 #include <ol_txrx.h>
+/* Lifetime counters survive mode switches, not module reloads. Each dispatch
+ * stage is separate: a message handed to the low-priority handler is counted
+ * there too. These are NOT packet or EAPOL counts. No payload bytes are read.
+ */
+#define HTT_DIAG_PATHS 3
+#define HTT_DIAG_TYPES 256
+#define HTT_DIAG_TEXT_MAX 4096
+static bool ol_rx_diag = true;
+module_param(ol_rx_diag, bool, 0644);
+MODULE_PARM_DESC(ol_rx_diag, "Count OL HTT dispatch entries and sample ingress logs");
+static atomic64_t htt_diag_counts[HTT_DIAG_PATHS][HTT_DIAG_TYPES];
+
+static int htt_diag_counts_get(char *buf, const struct kernel_param *kp)
+{
+	unsigned int path, type;
+	int used = 0;
+	long long count;
+
+	(void)kp;
+	for (path = 0; path < HTT_DIAG_PATHS; path++) {
+		for (type = 0; type < HTT_DIAG_TYPES; type++) {
+			count = atomic64_read(&htt_diag_counts[path][type]);
+			if (!count)
+				continue;
+			if (used > HTT_DIAG_TEXT_MAX - 64) {
+				used += scnprintf(buf + used, HTT_DIAG_TEXT_MAX - used,
+						  "truncated=1\n");
+				return used;
+			}
+			used += scnprintf(buf + used, HTT_DIAG_TEXT_MAX - used,
+					  "path=%u type=%u count=%lld\n", path, type, count);
+		}
+	}
+	return used;
+}
+
+static const struct kernel_param_ops htt_diag_counter_ops = {
+	.get = htt_diag_counts_get,
+};
+module_param_cb(ol_rx_diag_counts, &htt_diag_counter_ops, NULL, 0444);
+MODULE_PARM_DESC(ol_rx_diag_counts, "Nonzero HTT counts: path0=low,1=ordinary,2=fast; snapshot is not globally atomic");
+
+static void htt_diag_ingress(unsigned int path, unsigned int type,
+			     struct htt_pdev_t *pdev, qdf_nbuf_t msg)
+{
+	long long count;
+
+	if (!READ_ONCE(ol_rx_diag) || path >= HTT_DIAG_PATHS ||
+	    type >= HTT_DIAG_TYPES)
+		return;
+	count = atomic64_inc_return(&htt_diag_counts[path][type]);
+	/* Counts remain exact even when printk's per-callsite limiter suppresses. */
+	if (count <= 4 || !(count & (count - 1)))
+		pr_info_ratelimited("VIFACT htt-ingress mode=%u path=%u type=%u count=%lld bytes=%u full_reorder=%u\n",
+			cds_get_conparam(), path, type, count, qdf_nbuf_len(msg),
+			pdev->cfg.is_full_reorder_offload);
+}
+
 /*--- target->host HTT message dispatch function ----------------------------*/
 
 #ifndef DEBUG_CREDIT
@@ -222,6 +283,7 @@ static void htt_t2h_lp_msg_handler(void *context, qdf_nbuf_t htt_t2h_msg,
 
 	msg_word = (uint32_t *) qdf_nbuf_data(htt_t2h_msg);
 	msg_type = HTT_T2H_MSG_TYPE_GET(*msg_word);
+	htt_diag_ingress(0, msg_type, pdev, htt_t2h_msg);
 	switch (msg_type) {
 	case HTT_T2H_MSG_TYPE_VERSION_CONF:
 	{
@@ -753,6 +815,8 @@ void htt_t2h_msg_handler(void *context, HTC_PACKET *pkt)
 
 	/* check for successful message reception */
 	if (pkt->Status != QDF_STATUS_SUCCESS) {
+		pr_info_ratelimited("VIFACT htt-pre-dispatch-drop path=1 reason=transport status=%d\n",
+				    pkt->Status);
 		if (pkt->Status != QDF_STATUS_E_CANCELED)
 			pdev->stats.htc_err_cnt++;
 		qdf_nbuf_free(htt_t2h_msg);
@@ -771,6 +835,7 @@ void htt_t2h_msg_handler(void *context, HTC_PACKET *pkt)
 
 	msg_word = (uint32_t *) qdf_nbuf_data(htt_t2h_msg);
 	msg_type = HTT_T2H_MSG_TYPE_GET(*msg_word);
+	htt_diag_ingress(1, msg_type, pdev, htt_t2h_msg);
 
 #if defined(HELIUMPLUS_DEBUG)
 	QDF_TRACE(QDF_MODULE_ID_HTT, QDF_TRACE_LEVEL_INFO,
@@ -1127,6 +1192,7 @@ void htt_t2h_msg_handler_fast(void *context, qdf_nbuf_t *cmpl_msdus,
 
 		msg_word = (u_int32_t *) qdf_nbuf_data(htt_t2h_msg);
 		msg_type = HTT_T2H_MSG_TYPE_GET(*msg_word);
+		htt_diag_ingress(2, msg_type, pdev, htt_t2h_msg);
 
 		switch (msg_type) {
 		case HTT_T2H_MSG_TYPE_RX_IND:

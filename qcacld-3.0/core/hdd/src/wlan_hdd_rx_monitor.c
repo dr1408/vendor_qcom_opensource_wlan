@@ -108,6 +108,8 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
 	uint8_t vdev_id;
 	int ret;
+	bool backend_present;
+	ol_txrx_soc_handle dp_soc = soc;
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 
 	hdd_enter_dev(dev);
@@ -128,7 +130,15 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 		return -EINVAL;
 	}
 
+	/* The CDP wrapper may return success without invoking any backend. */
+	backend_present = dp_soc->ops && dp_soc->ops->cmn_drv_ops &&
+		dp_soc->ops->cmn_drv_ops->txrx_set_monitor_mode;
+	pr_info("VIFACT cdp-monitor-request if=%s mode=%u vdev=%u backend_present=%u special=0\n",
+		dev->name, cds_get_conparam(), vdev_id, backend_present);
 	ret = cdp_set_monitor_mode(soc, vdev_id, false);
+	pr_info("VIFACT cdp-monitor-return if=%s mode=%u vdev=%u status=%d backend_invoked=%u default_success=%u firmware_acceptance=unconfirmed\n",
+		dev->name, cds_get_conparam(), vdev_id, ret,
+		backend_present, !backend_present && !ret);
 	hdd_warn("VIFDIAG monitor CDP request vdev=%u status=%d (not RX validation)",
 		 vdev_id, ret);
 

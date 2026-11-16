@@ -597,6 +597,11 @@ QDF_STATUS htt_h2t_rx_ring_cfg_msg_ll(struct htt_pdev_t *pdev)
 	HTT_RX_RING_CFG_ENABLED_PHY_SET(*msg_word, enable_phy_data);
 	HTT_RX_RING_CFG_IDX_INIT_VAL_SET(*msg_word,
 					 *pdev->rx_ring.alloc_idx.vaddr);
+	pr_info("VIFACT htt-ring mode=%u vif_test=%u flags_index=0x%08x size=%u hdr=%d mgmt=%d ctrl=%d null=%d phy=%d ppdu=%d/%d\n",
+		cds_get_conparam(), htt_ol_monitor_vif_rx_enabled(), *msg_word,
+		pdev->rx_ring.size, enable_hdr, enable_mgmt_data,
+		enable_ctrl_data, enable_null_data, enable_phy_data,
+		enable_ppdu_start, enable_ppdu_end);
 
 	msg_word++;
 	*msg_word = 0;

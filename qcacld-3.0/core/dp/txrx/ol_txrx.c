@@ -6873,6 +6873,8 @@ ol_txrx_soc_handle ol_txrx_soc_attach(void *scn_handle,
 
 	soc->psoc = scn_handle;
 	soc->cdp_soc.ops = &ol_txrx_ops;
+	pr_info("VIFACT backend=OL mode=%u monitor_op_present=%u\n",
+		cds_get_conparam(), !!ol_ops_cmn.txrx_set_monitor_mode);
 	soc->cdp_soc.ol_ops = dp_ol_if_ops;
 
 	return ol_txrx_soc_t_to_cdp_soc_t(soc);

@@ -1227,6 +1227,11 @@ QDF_STATUS wma_vdev_start_resp_handler(struct vdev_mlme_obj *vdev_mlme,
 	const struct wlan_mlme_ratemask *ratemask_cfg;
 	struct config_ratemask_params rparams = {0};
 
+	/* Firmware event status, unlike the host WMI send return. */
+	if (rsp)
+		pr_info("VIFACT fw-start-response mode=%u vdev=%u fw_status=%u mac=%u\n",
+			cds_get_conparam(), rsp->vdev_id, rsp->status, rsp->mac_id);
+
 	wma = cds_get_context(QDF_MODULE_ID_WMA);
 	if (!wma)
 		return QDF_STATUS_E_FAILURE;

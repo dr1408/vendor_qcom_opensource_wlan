@@ -1,0 +1,56 @@
+Creek OL activation diagnostics
+==============================
+Baseline: d945a83. Diagnostic-only: retains original CDP default returns,
+firmware settings, RX parsers, packet ownership, TX decisions and teardown.
+No experimental EAPOL-copy or STOP-wait change is included.
+
+VIFACT records (dmesg)
+- backend=OL: actual OL attach, current global mode, monitor-op presence.
+- cdp-monitor-request/return: interface/vdev, backend presence/invocation,
+  default_success. A missing callback's zero return is NOT activation proof.
+- wmi-init: resource RX decap before submission; wmi-init-return: host status.
+- wmi-create/start: vdev type/subtype/radio/channel and host submission status.
+- wmi-pdev/vdev: HOST parameter IDs/values and submission status; rx_decap
+  explicitly identifies the per-vdev RX-decap parameter. IDs are not wire IDs.
+- fw-start-response: firmware event status, distinct from host send status.
+- htt-ring: final flags/index word AFTER helper/index encoding, ring size and
+  selected descriptor/filter enable flags. No physical addresses are printed.
+- htt-parser: actual global-mode/full-reorder parser selection.
+- htt-ingress: sampled path/type counts, bytes and full-reorder state.
+- htt-pre-dispatch-drop: ordinary handler transport error before dispatch.
+VIFTRACE netdev-input additionally records skb protocol and device type to
+investigate unexpected host traffic entering injection. No acceptance changes.
+
+Controls and exact dispatch counters
+/sys/module/wlan/parameters/creek_activation_diag (default Y): WMI setup logs.
+/sys/module/wlan/parameters/ol_rx_diag (default Y): HTT counting/sampled logs.
+/sys/module/wlan/parameters/ol_rx_diag_counts (read-only): nonzero path/type counts.
+Path 0=low-priority, 1=ordinary, 2=fast. Stages can count the SAME message again
+if forwarded to low-priority dispatch: never sum them as unique RX packets.
+Counts are dispatch entries, not successful parsing, EAPOL or delivered packets.
+Counters persist across mode changes, reset on module reload; save before/after
+snapshots for EACH phase and calculate deltas. Reads are not globally atomic.
+Output is bounded to4096 bytes and explicitly marks truncation. Disabling
+ol_rx_diag pauses counting. Missing sampled printk lines cannot prove no RX.
+
+Matched passive comparison
+1. Verify loaded module/build ID, diagnostics enabled, same INI and AP channel.
+2. Start local/persistent dmesg capture BEFORE mode activation. Save counter
+   snapshot and timestamped phase marker to /dev/kmsg before each transition.
+3. Known-good global mode4: channel6 wlan0; passive capture of owned AP;
+   reconnect own second phone. Save pcap, full dmesg and counter snapshot.
+4. Mode0 + fresh secondary monitor: trace create/up/set-channel; same passive
+   AP/client reconnect. Save the same evidence and verify counter deltas.
+5. Compare backend presence, firmware-init and per-vdev setup, final ring word,
+   firmware start response, all dispatch types, parser and delivery diagnostics.
+6. Stop capture/tracing first. Do not unload a module with active kprobes or
+   stale monitor state. Do not infer firmware acceptance from host send success.
+These logs do not establish OTA deauth origin; separate external capture may be
+needed. Do not change global RAW or parser selection based only on missing RX.
+
+Validation
+python3 tests/test_activation_diagnostics.py
+CC=clang python3 tests/test_activation_diagnostics.py
+Tests compile extracted WMI/HTT helpers in host stubs with warnings-as-errors
+and UBSan/bounds, check status preservation, counter/disable/bounds/truncation,
+and source invariants. NOT a full kernel build or runtime/hardware validation.

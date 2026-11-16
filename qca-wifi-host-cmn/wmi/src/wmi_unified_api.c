@@ -17,11 +17,18 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <linux/printk.h>
+#include <linux/moduleparam.h>
 #include "wmi_unified_priv.h"
 #include "wmi_unified_param.h"
 #include "qdf_module.h"
 #include "cdp_txrx_cmn_struct.h"
 #include <wmi_unified_vdev_api.h>
+
+/* Diagnostic logging only; no firmware configuration is changed. */
+static bool creek_activation_diag = true;
+module_param(creek_activation_diag, bool, 0644);
+MODULE_PARM_DESC(creek_activation_diag, "Log WMI activation submissions (not firmware acknowledgements)");
 
 static const wmi_host_channel_width mode_to_width[WMI_HOST_MODE_MAX] = {
 	[WMI_HOST_MODE_11A]           = WMI_HOST_CHAN_WIDTH_20,
@@ -79,11 +86,16 @@ QDF_STATUS wmi_unified_vdev_create_send(wmi_unified_t wmi_handle,
 					uint8_t macaddr[QDF_MAC_ADDR_SIZE],
 					struct vdev_create_params *param)
 {
-	if (wmi_handle->ops->send_vdev_create_cmd)
-		return wmi_handle->ops->send_vdev_create_cmd(wmi_handle,
-			   macaddr, param);
+	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 
-	return QDF_STATUS_E_FAILURE;
+	if (wmi_handle->ops->send_vdev_create_cmd)
+		status = wmi_handle->ops->send_vdev_create_cmd(wmi_handle,
+			   macaddr, param);
+	if (READ_ONCE(creek_activation_diag) && param)
+		pr_info("VIFACT wmi-create vdev=%u type=%u subtype=%u pdev=%u submit_status=%d\n",
+			param->vdev_id, param->type, param->subtype,
+			param->pdev_id, status);
+	return status;
 }
 
 QDF_STATUS wmi_unified_vdev_delete_send(wmi_unified_t wmi_handle,
@@ -132,10 +144,15 @@ QDF_STATUS wmi_unified_vdev_down_send(wmi_unified_t wmi_handle,
 QDF_STATUS wmi_unified_vdev_start_send(wmi_unified_t wmi_handle,
 				       struct vdev_start_params *req)
 {
-	if (wmi_handle->ops->send_vdev_start_cmd)
-		return wmi_handle->ops->send_vdev_start_cmd(wmi_handle, req);
+	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 
-	return QDF_STATUS_E_FAILURE;
+	if (wmi_handle->ops->send_vdev_start_cmd)
+		status = wmi_handle->ops->send_vdev_start_cmd(wmi_handle, req);
+	if (READ_ONCE(creek_activation_diag) && req)
+		pr_info("VIFACT wmi-start vdev=%u restart=%u freq=%u phy=%u submit_status=%d\n",
+			req->vdev_id, req->is_restart, req->channel.mhz,
+			req->channel.phy_mode, status);
+	return status;
 }
 
 QDF_STATUS
@@ -283,11 +300,15 @@ wmi_unified_pdev_param_send(wmi_unified_t wmi_handle,
 			    struct pdev_params *param,
 			    uint8_t mac_id)
 {
-	if (wmi_handle->ops->send_pdev_param_cmd)
-		return wmi_handle->ops->send_pdev_param_cmd(wmi_handle, param,
-				  mac_id);
+	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 
-	return QDF_STATUS_E_FAILURE;
+	if (wmi_handle->ops->send_pdev_param_cmd)
+		status = wmi_handle->ops->send_pdev_param_cmd(wmi_handle, param,
+				  mac_id);
+	if (READ_ONCE(creek_activation_diag) && param)
+		pr_info("VIFACT wmi-pdev mac=%u host_param=%u value=%u submit_status=%d\n",
+			mac_id, param->param_id, param->param_value, status);
+	return status;
 }
 
 QDF_STATUS wmi_unified_suspend_send(wmi_unified_t wmi_handle,
@@ -416,11 +437,16 @@ QDF_STATUS
 wmi_unified_vdev_set_param_send(wmi_unified_t wmi_handle,
 				struct vdev_set_params *param)
 {
-	if (wmi_handle->ops->send_vdev_set_param_cmd)
-		return wmi_handle->ops->send_vdev_set_param_cmd(wmi_handle,
-				  param);
+	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 
-	return QDF_STATUS_E_FAILURE;
+	if (wmi_handle->ops->send_vdev_set_param_cmd)
+		status = wmi_handle->ops->send_vdev_set_param_cmd(wmi_handle,
+				  param);
+	if (READ_ONCE(creek_activation_diag) && param)
+		pr_info("VIFACT wmi-vdev vdev=%u host_param=%u value=%u rx_decap=%u submit_status=%d\n",
+			param->vdev_id, param->param_id, param->param_value,
+			param->param_id == wmi_vdev_param_rx_decap_type, status);
+	return status;
 }
 
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
@@ -1642,10 +1668,18 @@ QDF_STATUS
 wmi_unified_init_cmd_send(wmi_unified_t wmi_handle,
 			  struct wmi_init_cmd_param *param)
 {
-	if (wmi_handle->ops->init_cmd_send)
-		return wmi_handle->ops->init_cmd_send(wmi_handle, param);
+	QDF_STATUS status = QDF_STATUS_E_FAILURE;
 
-	return QDF_STATUS_E_FAILURE;
+	if (READ_ONCE(creek_activation_diag) && param && param->res_cfg)
+		pr_info("VIFACT wmi-init rx_decap=%u num_vdevs=%u num_peers=%u phase=before-submit\n",
+			param->res_cfg->rx_decap_mode, param->res_cfg->num_vdevs,
+			param->res_cfg->num_peers);
+	if (wmi_handle->ops->init_cmd_send)
+		status = wmi_handle->ops->init_cmd_send(wmi_handle, param);
+	if (READ_ONCE(creek_activation_diag))
+		pr_info("VIFACT wmi-init-return submit_status=%d firmware_acceptance=unconfirmed\n",
+			status);
+	return status;
 }
 
 QDF_STATUS wmi_save_service_bitmap(wmi_unified_t wmi_handle, void *evt_buf,

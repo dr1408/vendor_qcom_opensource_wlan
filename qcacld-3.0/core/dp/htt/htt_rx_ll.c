@@ -2226,6 +2226,10 @@ int htt_rx_attach(struct htt_pdev_t *pdev)
 	if (cds_get_conparam() == QDF_GLOBAL_MONITOR_MODE)
 		htt_rx_amsdu_pop = htt_rx_mon_amsdu_rx_in_order_pop_ll;
 
+	pr_info("VIFACT htt-parser mode=%u full_reorder=%u parser=%s\n",
+		cds_get_conparam(), pdev->cfg.is_full_reorder_offload,
+		cds_get_conparam() == QDF_GLOBAL_MONITOR_MODE ? "monitor" :
+		(pdev->cfg.is_full_reorder_offload ? "native-in-order" : "native"));
 	htt_rx_offload_msdu_cnt = htt_rx_offload_msdu_cnt_ll;
 	htt_rx_offload_msdu_pop = htt_rx_offload_msdu_pop_ll;
 	htt_rx_mpdu_desc_retry = htt_rx_mpdu_desc_retry_ll;
