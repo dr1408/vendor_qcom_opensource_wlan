@@ -54,3 +54,23 @@ CC=clang python3 tests/test_activation_diagnostics.py
 Tests compile extracted WMI/HTT helpers in host stubs with warnings-as-errors
 and UBSan/bounds, check status preservation, counter/disable/bounds/truncation,
 and source invariants. NOT a full kernel build or runtime/hardware validation.
+
+Monitor TX input guard
+----------------------
+Radiotap-type netdevs now require a version0 radiotap header with a bounded
+length and actual trailing frame bytes, then the existing full TX-parameter
+parser must succeed. There is no raw fallback on a radiotap netdev. Legacy
+raw handling is retained only for non-radiotap netdevs. Ordinary host IPv4,
+IPv6 and ARP skb protocols are rejected before request allocation/queueing.
+GSO input is rejected; nonlinear packets must linearize before header access.
+Unsupported 802.11 protocol versions are rejected by the management validator.
+Drop logs identify host-network-protocol, missing-radiotap,
+invalid-radiotap-length, unsupported-skb-layout or malformed-radiotap.
+The guards apply to BOTH global and secondary monitor interfaces. No firmware
+RX, helper lifecycle, channel selection or management subtype policy changes.
+This closes the observed protocol0x86dd/FC0x0060 path. It does not prove or claim
+that all concurrent-mode disconnects are fixed. Valid injection needs device
+regression testing after build; no injection/radio tests run in host harnesses.
+Run all source/harness checks with:
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+CC=clang python3 -m unittest discover -s tests -p 'test_*.py' -v

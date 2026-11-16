@@ -2205,6 +2205,8 @@ static bool hdd_injection_frame_is_valid(const uint8_t *frame_data,
 		return false;
 
 	hdr = (const struct ieee80211_hdr *)frame_data;
+	if (get_unaligned_le16(frame_data) & IEEE80211_FCTL_VERS)
+		return false;
 	hdr_len = ieee80211_hdrlen(hdr->frame_control);
 
 	if (hdr_len < sizeof(struct ieee80211_hdr_3addr) || frame_len < hdr_len)
@@ -2213,11 +2215,40 @@ static bool hdd_injection_frame_is_valid(const uint8_t *frame_data,
 	return ieee80211_is_mgmt(hdr->frame_control);
 }
 
+/* A radiotap netdev has an explicit input format. Never reinterpret a host
+ * network packet or a malformed radiotap header as a raw 802.11 frame.
+ * Legacy raw input is retained only for non-radiotap netdevs. This applies
+ * equally to global monitor and secondary monitor VIFs.
+ */
+static const char *
+hdd_monitor_tx_input_error(const uint8_t *data, uint32_t len,
+			   uint16_t protocol, bool needs_radiotap,
+			   uint16_t *rtap_len)
+{
+	uint16_t length;
+
+	*rtap_len = 0;
+	if (protocol == ETH_P_IP || protocol == ETH_P_IPV6 ||
+	    protocol == ETH_P_ARP)
+		return "host-network-protocol";
+
+	if (!data || len < sizeof(struct ieee80211_radiotap_header) ||
+	    data[0] != 0)
+		return needs_radiotap ? "missing-radiotap" : NULL;
+
+	length = get_unaligned_le16(data + 2);
+	if (length < sizeof(struct ieee80211_radiotap_header) || length >= len)
+		return needs_radiotap ? "invalid-radiotap-length" : NULL;
+
+	*rtap_len = length;
+	return NULL;
+}
+
 /**
  * hdd_monitor_mode_tx_inject() - inject frame from monitor netdev
  * @adapter: HDD adapter
  * @dev: net_device carrying frame
- * @skb: Tx skb containing radiotap + 802.11, or raw 802.11 frame
+ * @skb: Radiotap + 802.11 on radiotap netdevs; legacy raw on other netdevs
  *
  * Return: None
  */
@@ -2225,11 +2256,11 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 				       struct net_device *dev,
 				       struct sk_buff *skb)
 {
-	struct ieee80211_radiotap_header *rthdr;
 	struct hdd_radiotap_tx_params rtap_params;
 	struct inject_frame_req *req;
 	uint8_t *frame_data;
-	uint16_t rtap_len;
+	uint16_t rtap_len = 0;
+	const char *input_error;
 	uint32_t frame_len;
 	uint64_t now;
 	QDF_STATUS status;
@@ -2252,22 +2283,26 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 			    dev->name, adapter->vdev_id, skb->len,
 			    ntohs(skb->protocol), dev->type);
 
+	/* Complete headers must be readable before any format detection. */
+	if (skb_is_gso(skb) || skb_linearize(skb)) {
+		pr_warn_ratelimited("VIFTRACE drop=unsupported-skb-layout if=%s len=%u\n",
+				    dev->name, skb->len);
+		goto drop;
+	}
+	input_error = hdd_monitor_tx_input_error(skb->data, skb->len,
+					       ntohs(skb->protocol),
+					       dev->type == ARPHRD_IEEE80211_RADIOTAP,
+					       &rtap_len);
+	if (input_error) {
+		pr_warn_ratelimited("VIFTRACE drop=%s if=%s protocol=0x%04x devtype=%u len=%u\n",
+				    input_error, dev->name, ntohs(skb->protocol),
+				    dev->type, skb->len);
+		goto drop;
+	}
+	has_radiotap = rtap_len != 0;
 	if (skb->len < 10) {
 		hdd_err_rl("monitor tx: invalid skb len %u", skb->len);
 		goto drop;
-	}
-
-	/*
-	 * Prefer radiotap format (normal for monitor TX), but allow fallback to
-	 * raw 802.11 if userspace or netdev path does not prepend radiotap.
-	 */
-	if (skb->len >= sizeof(struct ieee80211_radiotap_header)) {
-		rthdr = (struct ieee80211_radiotap_header *)skb->data;
-		if (rthdr->it_version == 0) {
-			rtap_len = get_unaligned_le16(&rthdr->it_len);
-			if (rtap_len >= sizeof(struct ieee80211_radiotap_header) && rtap_len < skb->len)
-				has_radiotap = true;
-		}
 	}
 
 	/*
