@@ -1,0 +1,93 @@
+Native OL EAPOL observer (fresh implementation, not a branch restoration)
+======================================================================
+
+Evidence motivating this change
+-------------------------------
+Mode0 Wifite test, 2026-11-16: native parser returned status1 and a linear
+159-byte QoS ToDS frame. LLC EtherType888e and EAPOL-Key prefix were observed.
+The original was then discarded with reason=no-validated-raw-bridge.
+This is distinct from passive mode0 tests with zero new native indications.
+No claim that firmware always forwards native data or both EAPOL directions.
+
+Scope and enabling
+------------------
+Load-time module option: ol_monitor_eapol_rx=1 (default false, read-only).
+This is separate from ol_monitor_wmi_rx and ol_monitor_vif_rx.
+No global RAW initialization, native parser, WMI management mirror, injection,
+monitor STOP/DOWN/DELETE ordering, INI or Magisk changes are part of this patch.
+
+Hook location and ownership
+---------------------------
+ol_rx_in_order_indication_handler invokes the observer for EACH buffer after
+successful native pop, DMA unmap and ring replenish, before unknown/self-peer
+discard or regular delivery. Offload indications and global con_mode4 are
+excluded. The observer never edits, pulls, frees or detaches an original skb.
+A separate allocation contains empty radiotap + validated 802.11 MPDU.
+Unknown/self-peer originals still follow the existing discard; real STA
+originals retain normal processing. Copy delivery does not consume originals.
+
+Buffer and decapsulation contract
+----------------------------------
+Only linear, bounded buffers and descriptors wholly in skb headroom are read.
+Require msdu_done, no FCS/MPDU-length errors, first AND last MSDU (no A-MSDU
+assembly attempted). Unsupported cases are explicitly counted, not guessed.
+Descriptor decap0 RAW: use the received packet's own 802.11 header and LLC.
+Do not require the separate ETH2 rx_hdr_status shadow to duplicate RAW data.
+Descriptor decap3 ETH2: Ethernet EtherType must be888e; captured 802.11 header,
+LLC, direction-derived SA/DA and available EAPOL prefix must match the packet.
+Firmware WMI resource rx_decap_mode and RX-descriptor decap enums differ.
+These numbers must not be interchanged.
+
+Accept version0 non-fragmented data or QoS data, ToDS or FromDS, no A-MSDU or
+four-address assembly. QoS/HT control lengths are checked. Protected frames
+are conservatively rejected; no cipher stripping/decryption is invented.
+Validate EAPOL version1..3, type3, RSN/WPA descriptor2/254, fixed body >=95,
+complete declared body and consistent Key Data Length. Both directions pass
+the same validator; no M1/M3 versus M2/M4 policy is imposed.
+RAW must have exact MPDU length or exactly four additional bytes whose CRC32
+matches IEEE802.11 FCS. Only a verified FCS is stripped. Unknown padding is
+rejected and counted; the earlier header-only kprobe did not verify its CRC.
+ETH2 trailing Ethernet padding is not copied beyond declared EAPOL length.
+No fabricated TSF, signal, channel or FCS metadata appears in empty radiotap.
+
+Lifecycle and callback ownership
+-------------------------------
+Snapshot monitor id/generation/channel under peer_ref_mutex; validate and
+allocate without holding the lock. Reacquire and verify monitor identity,
+opmode, generation, current frequency, callback, context and non-detaching
+state before synchronous enqueue. Like the existing management bridge, the
+HDD callback is invoked under this lock so osif_dev cannot disappear between
+validation and enqueue. It must not sleep or reenter OL. Current
+hdd_mon_rx_packet_cbk was checked: error returns are before consumption;
+success consumes the private skb even if the stack rejects it. Free only
+private allocations on error. Never free a copy again after callback success.
+
+Diagnostics
+-----------
+Read /sys/module/wlan/parameters/ol_monitor_eapol_stats before/after a test.
+Counters are atomic, module-lifetime, not a globally simultaneous snapshot:
+ calls, context_skip, not_ready, buffer_layout, descriptor_status, raw, eth2,
+ unsupported_decap, not_key, header, length, fcs, header_payload_mismatch,
+ tods, fromds, allocation, stale_monitor, callback_failure, delivered.
+Raw/eth2 count classified buffers; tods/fromds count fully validated Key
+frames; delivered counts successful callback handoff, NOT confirmed pcap or
+complete handshake. Reasons remain countable when VIFEAPOL logs rate-limit.
+Do not sum overlapping gate/format/delivery counters as distinct packets.
+
+Validation performed
+--------------------
+Host tests compile the actual validator header and actual observer body with
+kernel/QDF stubs using GCC and Clang, -Werror and UBSan/bounds checks.
+Cover RAW/ETH2 both directions, QoS/non-QoS, declared lengths, verified/bad FCS,
+address/payload mismatch, unsupported headers, exact-size short allocations,
+PROT_NONE guard pages at every short buffer boundary,
+default-off/mode4 exclusion, non-mutated originals, private-copy ownership,
+allocation failure, stale monitor and callback failure. Hook-order checks
+ensure observation is before discard and does not substitute a parser.
+This is NOT a successful full kernel build or live RX verification.
+Next live proof: copied frames visible in wlan0mon pcap, then determine whether
+AP->client EAPOL actually arrives. This patch cannot manufacture missing RX.
+
+ASan was also attempted on the Android host but could not initialize its
+shadow-memory mapping (mmap failure before main); it is NOT a passing test.
+Guard-page tests plus GCC/Clang UBSan/bounds are the available local checks.

@@ -154,7 +154,8 @@ int main(void) {
         rx = source('qcacld-3.0/core/dp/htt/htt_rx_ll.c')
         self.assertIn('if (cds_get_conparam() == QDF_GLOBAL_MONITOR_MODE)\n'
                       '\t\thtt_rx_amsdu_pop = htt_rx_mon_amsdu_rx_in_order_pop_ll;', rx)
-        self.assertNotIn('ol_monitor_eapol_copy', source('qcacld-3.0/core/dp/txrx/ol_rx.c'))
+        # Copy observes native output; it must not replace the selected parser.
+        self.assertNotIn('ol_monitor_eapol_copy', rx)
 
     def test_cdp_backend_and_firmware_response_are_separate(self):
         hdd = source('qcacld-3.0/core/hdd/src/wlan_hdd_rx_monitor.c')

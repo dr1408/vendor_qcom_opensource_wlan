@@ -42,6 +42,10 @@
 #include "ol_monitor_mgmt.h"
 #include <linux/atomic.h>
 #include <linux/moduleparam.h>
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+#include <linux/crc32.h>
+#include "ol_monitor_eapol_validate.h"
+#endif
 #include <ol_txrx_dbg.h>
 #include <cdp_txrx_ocb.h>
 #include <ol_txrx_ctrl_api.h>
@@ -5772,6 +5776,183 @@ module_param_cb(ol_monitor_wmi_dropped, &ol_monitor_mgmt_counter_ops,
 		&ol_monitor_wmi_dropped, 0444);
 
 
+
+/* A separate experiment from WMI management mirroring. Load-time opt-in only. */
+static bool ol_monitor_eapol_rx;
+module_param(ol_monitor_eapol_rx, bool, 0444);
+MODULE_PARM_DESC(ol_monitor_eapol_rx,
+	"Copy validated native RAW/ETH2 EAPOL-Key RX to secondary OL monitor");
+
+enum ol_eapol_counter {
+	EC_CALLS, EC_CONTEXT, EC_NOT_READY, EC_LAYOUT, EC_DESCRIPTOR,
+	EC_RAW, EC_ETH2, EC_UNSUPPORTED, EC_NOT_KEY, EC_HEADER, EC_LENGTH,
+	EC_FCS, EC_MISMATCH, EC_TODS, EC_FROMDS, EC_ALLOC, EC_STALE,
+	EC_CALLBACK, EC_DELIVERED, EC_MAX
+};
+static atomic64_t ol_eapol_counts[EC_MAX];
+static const char * const ol_eapol_names[EC_MAX] = {
+	"calls", "context_skip", "not_ready", "buffer_layout", "descriptor_status",
+	"raw", "eth2", "unsupported_decap", "not_key", "header", "length",
+	"fcs", "header_payload_mismatch", "tods", "fromds", "allocation",
+	"stale_monitor", "callback_failure", "delivered"
+};
+
+static int ol_monitor_eapol_stats_get(char *buf, const struct kernel_param *kp)
+{
+	unsigned int i;
+	int len = 0;
+
+	(void)kp;
+	for (i = 0; i < EC_MAX; i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%s=%lld\n",
+				 ol_eapol_names[i],
+				 (long long)atomic64_read(&ol_eapol_counts[i]));
+	return len;
+}
+static const struct kernel_param_ops ol_eapol_stats_ops = {
+	.get = ol_monitor_eapol_stats_get,
+};
+module_param_cb(ol_monitor_eapol_stats, &ol_eapol_stats_ops, NULL, 0444);
+
+void ol_monitor_eapol_copy(struct cdp_soc_t *soc_hdl, qdf_nbuf_t msdu,
+			   uint16_t peer_id)
+{
+	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
+	struct ol_txrx_pdev_t *pdev;
+	struct ol_txrx_vdev_t *mon;
+	struct htt_host_rx_desc_base *desc;
+	struct ol_eapol_span span = {0};
+	enum ol_eapol_result result;
+	enum ol_eapol_counter reason = EC_CONTEXT;
+	uint8_t captured[RX_HTT_HDR_STATUS_LEN], *data, *out, id;
+	uint32_t length, frequency, decap;
+	uint64_t generation;
+	qdf_nbuf_t copy;
+
+	if (!READ_ONCE(ol_monitor_eapol_rx))
+		return;
+	atomic64_inc(&ol_eapol_counts[EC_CALLS]);
+	if (!soc || !msdu || cds_get_conparam() == QDF_GLOBAL_MONITOR_MODE)
+		goto reject;
+	pdev = ol_txrx_get_pdev_from_pdev_id(soc, OL_TXRX_PDEV_ID);
+	if (!pdev)
+		goto reject;
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	mon = pdev->monitor_vdev;
+	if (!mon || mon->opmode != wlan_op_mode_monitor || !mon->rx ||
+	    !mon->osif_dev || !mon->monitor_mgmt_frequency ||
+	    qdf_atomic_read(&mon->delete.detaching)) {
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		reason = EC_NOT_READY;
+		goto reject;
+	}
+	id = mon->vdev_id;
+	generation = mon->monitor_mgmt_generation;
+	frequency = mon->monitor_mgmt_frequency;
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+
+	/* Parser owns originals; all validation/copy is read-only and synchronous. */
+	length = qdf_nbuf_len(msdu);
+	if (qdf_nbuf_is_nonlinear(msdu) || length < 18 || length > 4096) {
+		reason = EC_LAYOUT;
+		goto reject;
+	}
+	data = qdf_nbuf_data(msdu);
+	desc = htt_rx_desc(msdu);
+	if ((uint8_t *)desc < qdf_nbuf_head(msdu) ||
+	    (uint8_t *)(desc + 1) > data) {
+		reason = EC_LAYOUT;
+		goto reject;
+	}
+	decap = desc->msdu_start.decap_format;
+	if (decap == 0)
+		atomic64_inc(&ol_eapol_counts[EC_RAW]);
+	else if (decap == 3)
+		atomic64_inc(&ol_eapol_counts[EC_ETH2]);
+	else {
+		reason = EC_UNSUPPORTED;
+		goto reject;
+	}
+	if (!desc->attention.msdu_done || desc->attention.fcs_err ||
+	    desc->attention.mpdu_length_err ||
+	    !desc->msdu_end.first_msdu || !desc->msdu_end.last_msdu) {
+		reason = EC_DESCRIPTOR;
+		goto reject;
+	}
+	if (decap == 0) {
+		/* RAW already contains the original 802.11 header and LLC.
+		 * Do NOT reinterpret it as Ethernet or require an ETH2 header shadow.
+		 */
+		result = ol_eapol_raw(data, length, &span);
+	} else {
+		qdf_mem_copy(captured, desc->rx_hdr_status, sizeof(captured));
+		result = ol_eapol_eth2(captured, sizeof(captured), data,
+				       length, &span);
+	}
+	if (result != OL_EAPOL_OK) {
+		switch (result) {
+		case OL_EAPOL_NOT_KEY: reason = EC_NOT_KEY; break;
+		case OL_EAPOL_HEADER: reason = EC_HEADER; break;
+		case OL_EAPOL_LENGTH: reason = EC_LENGTH; break;
+		case OL_EAPOL_FCS: reason = EC_FCS; break;
+		case OL_EAPOL_MISMATCH: reason = EC_MISMATCH; break;
+		default: reason = EC_LAYOUT; break;
+		}
+		goto reject;
+	}
+	atomic64_inc(&ol_eapol_counts[span.direction == 1 ? EC_TODS : EC_FROMDS]);
+	copy = qdf_nbuf_alloc(NULL, 8 + span.mpdu_len, 0, 4, false);
+	if (!copy || !qdf_nbuf_put_tail(copy, 8 + span.mpdu_len)) {
+		if (copy)
+			qdf_nbuf_free(copy);
+		reason = EC_ALLOC;
+		goto reject;
+	}
+	out = qdf_nbuf_data(copy);
+	qdf_mem_zero(out, 8);
+	out[2] = 8; /* Empty radiotap; no invented RSSI, channel, TSF or FCS flag. */
+	if (decap == 0) {
+		qdf_mem_copy(out + 8, data, span.mpdu_len);
+	} else {
+		qdf_mem_copy(out + 8, captured, span.header_len);
+		qdf_mem_copy(out + 8 + span.header_len, data + 14, span.body_len);
+	}
+	qdf_nbuf_set_next(copy, NULL);
+	/* Same lifetime discipline as the existing WMI bridge: unpublication,
+	 * channel/generation changes and synchronous HDD enqueue share this lock.
+	 * HDD callback must not sleep or reenter OL. Do not retain osif_dev unlocked.
+	 */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	mon = pdev->monitor_vdev;
+	if (!mon || mon->vdev_id != id || mon->opmode != wlan_op_mode_monitor ||
+	    mon->monitor_mgmt_generation != generation ||
+	    mon->monitor_mgmt_frequency != frequency || !mon->rx || !mon->osif_dev ||
+	    qdf_atomic_read(&mon->delete.detaching)) {
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		qdf_nbuf_free(copy);
+		reason = EC_STALE;
+		goto reject;
+	}
+	/* Audited hdd_mon_rx_packet_cbk: failure is before consumption;
+	 * success consumes the private copy even if the network stack drops it.
+	 */
+	if (mon->rx(mon->osif_dev, copy) != QDF_STATUS_SUCCESS) {
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		qdf_nbuf_free(copy);
+		reason = EC_CALLBACK;
+		goto reject;
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+	atomic64_inc(&ol_eapol_counts[EC_DELIVERED]);
+	pr_info_ratelimited("VIFEAPOL copied peer=%u vdev=%u decap=%u ds=%u len=%u fcs_stripped=%u generation=%llu\n",
+		peer_id, id, decap, span.direction, span.mpdu_len,
+		span.fcs, (unsigned long long)generation);
+	return;
+reject:
+	atomic64_inc(&ol_eapol_counts[reason]);
+	pr_info_ratelimited("VIFEAPOL reject peer=%u reason=%s\n",
+		peer_id, ol_eapol_names[reason]);
+}
 
 void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc_hdl, uint8_t id,
                                 uint32_t frequency)

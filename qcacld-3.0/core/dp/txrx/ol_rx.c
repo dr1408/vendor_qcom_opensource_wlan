@@ -18,6 +18,7 @@
  */
 
 #include <linux/ratelimit.h>
+#include "ol_monitor_mgmt.h"
 #include <qdf_nbuf.h>               /* qdf_nbuf_t, etc. */
 #include <qdf_util.h>               /* qdf_cpu_to_le64 */
 #include <qdf_types.h>              /* bool */
@@ -1691,12 +1692,26 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	/* rx_opt_proc takes a NULL-terminated list of msdu netbufs */
 	qdf_nbuf_set_next(tail_msdu, NULL);
 
+	/* Observe every successfully popped, DMA-unmapped native buffer before
+	 * normal delivery or unknown-peer discard. Never change parser selection,
+	 * original bytes, chain links or ownership; global monitor stays untouched.
+	 */
+	if (cds_get_conparam() != QDF_GLOBAL_MONITOR_MODE &&
+	    !HTT_RX_IN_ORD_PADDR_IND_OFFLOAD_GET(msg_word[0])) {
+		qdf_nbuf_t observed;
+
+		for (observed = head_msdu; observed;
+		     observed = qdf_nbuf_next(observed))
+			ol_monitor_eapol_copy((struct cdp_soc_t *)soc, observed,
+					      peer_id);
+	}
+
 	if (mon_candidate) {
 		/* Native buffers retain RX descriptors, not radiotap headers.
 		 * Do not send unknown/self-monitor traffic into STA forwarding.
-		 * A validated OL raw-copy bridge is a separate capability.
+		 * The opt-in observer above only delivers a validated private copy.
 		 */
-		pr_info_ratelimited("VIFRX native-drop peer=%u bytes=%u replenished=%u reason=no-validated-raw-bridge\n",
+		pr_info_ratelimited("VIFRX native-drop peer=%u bytes=%u replenished=%u reason=original-not-forwarded-to-sta\n",
 			peer_id, qdf_nbuf_len(head_msdu), filled);
 		ol_rx_frames_free(htt_pdev, head_msdu);
 		return;
