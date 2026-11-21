@@ -3013,6 +3013,34 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 	pr_info_ratelimited("VIFTRACE stage=wmi-link id=%u desc=%u route_vdev=%u tx_vdev=%u\n",
 			    req->session_id, mgmt_params.desc_id, vdev_id,
 			    mgmt_params.vdev_id);
+	if (fc_type == 0x00 && (fc_subtype == 0xb0 || fc_subtype == 0xc0)) {
+		pr_info("VIFTXCMD pre mode=%d route=%u tx=%u freq=%u desc=%u len=%u type=%u flags=0x%x valid=%u pwr=%u rate=0x%x nss=0x%x retry=%u retry_ext=%u chain=0x%x bw=0x%x preamble=0x%x frame_type=%u cfr=%u beamform=%u use_6mbps=%u rssi=%d peer=%pM frame=%*phN\n",
+			cds_get_conparam(), vdev_id, mgmt_params.vdev_id,
+			mgmt_params.chanfreq, mgmt_params.desc_id,
+			mgmt_params.frm_len, mgmt_params.tx_type,
+			mgmt_params.tx_flags, mgmt_params.tx_params_valid,
+			mgmt_params.tx_param.pwr, mgmt_params.tx_param.mcs_mask,
+			mgmt_params.tx_param.nss_mask,
+			mgmt_params.tx_param.retry_limit,
+			mgmt_params.tx_param.retry_limit_ext,
+			mgmt_params.tx_param.chain_mask,
+			mgmt_params.tx_param.bw_mask,
+			mgmt_params.tx_param.preamble_type,
+			mgmt_params.tx_param.frame_type,
+			mgmt_params.tx_param.cfr_enable,
+			mgmt_params.tx_param.en_beamforming,
+			mgmt_params.use_6mbps, mgmt_params.peer_rssi,
+			mgmt_params.macaddr,
+			min_t(unsigned int, mgmt_params.frm_len, 64),
+			mgmt_params.pdata);
+		pr_info("VIFTXCMD topology mode=%d sta0_active=%u sta0_type=%u monitor=%u helper=%u helper_type=%u freq=%u\n",
+			cds_get_conparam(),
+			wma_handle->interfaces[0].vdev_active,
+			wma_handle->interfaces[0].type,
+			g_inj_tx_vdev.monitor_vdev_id,
+			g_inj_tx_vdev.vdev_id, tx_vdev_type,
+			g_inj_tx_vdev.freq);
+	}
 
 	/* Attempt WMI management TX path. */
 	wmi_tx_attempted = true;

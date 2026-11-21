@@ -3796,6 +3796,32 @@ static inline QDF_STATUS populate_tx_send_params(uint8_t *bufp,
 	return status;
 }
 
+static void
+wmi_vif_diag_mgmt_cmd(wmi_mgmt_tx_send_cmd_fixed_param *cmd,
+			  struct wmi_mgmt_params *param, int32_t cmd_len)
+{
+	uint8_t *frame = param->pdata;
+	uint8_t subtype;
+
+	if (!frame || param->frm_len < 24 || (frame[0] & 0x0c))
+		return;
+
+	subtype = frame[0] & 0xf0;
+	if (subtype != 0xb0 && subtype != 0xc0)
+		return;
+
+	pr_info("VIFTXCMD wire vdev=%u freq=%u desc=%u frame_len=%u buf_len=%u valid=%u flags=0x%x rssi=%d cmd_len=%d pwr=%u rate=0x%x nss=0x%x retry=%u retry_ext=%u chain=0x%x bw=0x%x preamble=0x%x frame_type=%u cfr=%u beamform=%u frame=%*phN\n",
+		cmd->vdev_id, cmd->chanfreq, cmd->desc_id, cmd->frame_len,
+		cmd->buf_len, cmd->tx_params_valid, cmd->tx_flags,
+		cmd->peer_rssi, cmd_len, param->tx_param.pwr,
+		param->tx_param.mcs_mask, param->tx_param.nss_mask,
+		param->tx_param.retry_limit, param->tx_param.retry_limit_ext,
+		param->tx_param.chain_mask, param->tx_param.bw_mask,
+		param->tx_param.preamble_type, param->tx_param.frame_type,
+		param->tx_param.cfr_enable, param->tx_param.en_beamforming,
+		min_t(int, param->frm_len, 64), frame);
+}
+
 #ifdef CONFIG_HL_SUPPORT
 /**
  *  send_mgmt_cmd_tlv() - WMI scan start function
@@ -3863,6 +3889,7 @@ static QDF_STATUS send_mgmt_cmd_tlv(wmi_unified_t wmi_handle,
 		}
 		cmd_len += sizeof(wmi_tx_send_params);
 	}
+	wmi_vif_diag_mgmt_cmd(cmd, param, cmd_len);
 
 	wmi_mtrace(WMI_MGMT_TX_SEND_CMDID, cmd->vdev_id, 0);
 	if (wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
@@ -3958,6 +3985,7 @@ static QDF_STATUS send_mgmt_cmd_tlv(wmi_unified_t wmi_handle,
 		}
 		cmd_len += sizeof(wmi_tx_send_params);
 	}
+	wmi_vif_diag_mgmt_cmd(cmd, param, cmd_len);
 
 	wmi_mtrace(WMI_MGMT_TX_SEND_CMDID, cmd->vdev_id, 0);
 	if (wmi_unified_cmd_send(wmi_handle, buf, cmd_len,
