@@ -2637,6 +2637,40 @@ QDF_STATUS wma_flush_injection_queue(tp_wma_handle wma_handle)
 	return QDF_STATUS_SUCCESS;
 }
 
+/*
+ * Dump WMA's vdev view for auth/deauth injection.  This is intentionally
+ * limited to the diagnostic management subtypes to avoid flooding dmesg.
+ */
+static void wma_injection_dump_vdev_table(tp_wma_handle wma)
+{
+	uint16_t i;
+
+	if (!wma || !wma->interfaces)
+		return;
+
+	for (i = 0; i < wma->max_bssid; i++) {
+		struct wlan_objmgr_vdev *vdev = wma->interfaces[i].vdev;
+		uint8_t *mac;
+		uint32_t freq = 0;
+
+		if (!vdev) {
+			pr_info_ratelimited("VIFDIAG table id=%u active=%u type=%u vdev=NULL\n",
+					    i, wma->interfaces[i].vdev_active,
+					    wma->interfaces[i].type);
+			continue;
+		}
+
+		mac = wlan_vdev_mlme_get_macaddr(vdev);
+		if (vdev->vdev_mlme.des_chan)
+			freq = vdev->vdev_mlme.des_chan->ch_freq;
+		pr_info_ratelimited("VIFDIAG table id=%u active=%u type=%u mac=%pM freq=%u helper=%u\n",
+				    i, wma->interfaces[i].vdev_active,
+				    wma->interfaces[i].type, mac, freq,
+				    g_inj_tx_vdev.created &&
+				    i == g_inj_tx_vdev.vdev_id);
+	}
+}
+
 QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 					  struct inject_frame_req *req,
 					  uint8_t vdev_id)
@@ -2707,6 +2741,12 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 	fc_type = fc0 & 0x0c;
 	fc_subtype = fc0 & 0xf0;
 	is_probe_req = (fc_type == 0x00 && fc_subtype == 0x40);
+	if (fc_type == 0x00 && (fc_subtype == 0xb0 || fc_subtype == 0xc0)) {
+		pr_info_ratelimited("VIFDIAG tx subtype=%02x route_vdev=%u len=%u mode=%d\n",
+				    fc_subtype, vdev_id, req->frame_len,
+				    cds_get_conparam());
+		wma_injection_dump_vdev_table(wma_handle);
+	}
 	if (req->frame_len >= 10)
 		is_group_da = qdf_is_macaddr_group(
 			(struct qdf_mac_addr *)&req->frame_data[4]);
