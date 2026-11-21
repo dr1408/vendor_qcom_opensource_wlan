@@ -3039,7 +3039,7 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 			wma_handle->interfaces[0].type,
 			g_inj_tx_vdev.monitor_vdev_id,
 			g_inj_tx_vdev.vdev_id, tx_vdev_type,
-			g_inj_tx_vdev.freq);
+			g_inj_tx_vdev.chanfreq);
 	}
 
 	/* Attempt WMI management TX path. */
