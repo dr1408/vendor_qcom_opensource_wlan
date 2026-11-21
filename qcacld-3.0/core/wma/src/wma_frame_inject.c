@@ -278,6 +278,49 @@ static struct wma_injection_peer_rsp_state g_inj_peer_rsp;
 static QDF_STATUS wma_injection_destroy_tx_vdev(tp_wma_handle wma);
 static uint32_t wma_injection_vdev_inflight(uint8_t vdev_id);
 
+/*
+ * Diagnose whether the firmware-only helper is about to create, authorize or
+ * delete a MAC which is already owned by a real host vdev.  Do not use this
+ * result for admission: this build is intended to preserve the observed TX
+ * behaviour while establishing whether concurrent STA peer state aliases the
+ * helper's transient directed peer.
+ */
+static void
+wma_injection_diag_peer_owners(tp_wma_handle wma, const uint8_t *peer_addr,
+			       const char *operation)
+{
+	struct cdp_soc_t *soc;
+	uint32_t cdp_vdev_mask = 0;
+	uint8_t obj_vdev_id = 0xff;
+	uint8_t i;
+	bool obj_found;
+
+	if (!wma || !wma->psoc || !peer_addr || !operation)
+		return;
+
+	soc = cds_get_context(QDF_MODULE_ID_SOC);
+	obj_found = wma_objmgr_peer_exist(wma, (uint8_t *)peer_addr,
+					  &obj_vdev_id);
+	if (soc) {
+		for (i = 0; i < wma->max_bssid && i < 32; i++) {
+			if (cdp_find_peer_exist_on_vdev(soc, i,
+						    (uint8_t *)peer_addr))
+				cdp_vdev_mask |= BIT(i);
+		}
+	}
+
+	pr_info("VIFDIAG peer-owner op=%s peer=%pM mode=%d helper_created=%u helper_vdev=%u helper_monitor=%u helper_freq=%u self_ready=%u upeer_created=%u upeer_pending=%u obj_found=%u obj_vdev=%u cdp_vdev_mask=0x%x inflight=%u\n",
+		operation, peer_addr, cds_get_conparam(),
+		g_inj_tx_vdev.created, g_inj_tx_vdev.vdev_id,
+		g_inj_tx_vdev.monitor_vdev_id, g_inj_tx_vdev.chanfreq,
+		g_inj_tx_vdev.self_peer_ready,
+		g_inj_tx_vdev.unicast_peer_created,
+		g_inj_tx_vdev.unicast_peer_create_pending ||
+		g_inj_tx_vdev.unicast_peer_delete_pending,
+		obj_found, obj_vdev_id, cdp_vdev_mask,
+		wma_injection_vdev_inflight(g_inj_tx_vdev.vdev_id));
+}
+
 static void
 wma_injection_peer_rsp_prepare(uint8_t vdev_id, const uint8_t *peer_addr,
 			       enum wma_injection_peer_rsp_type type)
@@ -377,6 +420,8 @@ wma_injection_ensure_unicast_peer(tp_wma_handle wma, const uint8_t *peer_addr)
 	    qdf_is_macaddr_zero((struct qdf_mac_addr *)peer_addr))
 		return QDF_STATUS_E_INVAL;
 
+	wma_injection_diag_peer_owners(wma, peer_addr, "ensure");
+
 	sync_peer_rsp = wlan_psoc_nif_fw_ext_cap_get(
 		wma->psoc, WLAN_SOC_F_PEER_CREATE_RESP);
 	if (g_inj_tx_vdev.unicast_peer_create_pending) {
@@ -417,6 +462,9 @@ wma_injection_ensure_unicast_peer(tp_wma_handle wma, const uint8_t *peer_addr)
 				g_inj_tx_vdev.vdev_id,
 				g_inj_tx_vdev.unicast_peer_addr,
 				WMA_INJECTION_PEER_RSP_DELETE);
+		wma_injection_diag_peer_owners(
+			wma, g_inj_tx_vdev.unicast_peer_addr,
+			"replace-delete-submit");
 		status = wmi_unified_peer_delete_send(
 			wma->wmi_handle, g_inj_tx_vdev.unicast_peer_addr,
 			g_inj_tx_vdev.vdev_id);
@@ -447,6 +495,7 @@ wma_injection_ensure_unicast_peer(tp_wma_handle wma, const uint8_t *peer_addr)
 	if (sync_peer_rsp)
 		wma_injection_peer_rsp_prepare(g_inj_tx_vdev.vdev_id, peer_addr,
 					       WMA_INJECTION_PEER_RSP_CREATE);
+	wma_injection_diag_peer_owners(wma, peer_addr, "create-submit");
 	status = wmi_unified_peer_create_send(wma->wmi_handle, &create);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		if (sync_peer_rsp)
@@ -479,6 +528,9 @@ wma_injection_ensure_unicast_peer(tp_wma_handle wma, const uint8_t *peer_addr)
 	if (QDF_IS_STATUS_ERROR(status))
 		wma_warn("Injection peer authorize failed, continuing best-effort: helper_vdev=%u peer=%pM status=%d",
 			 g_inj_tx_vdev.vdev_id, peer_addr, status);
+	wma_injection_diag_peer_owners(wma, peer_addr,
+				       QDF_IS_STATUS_ERROR(status) ?
+				       "authorize-failed" : "authorize-submitted");
 	g_wma_injection_ctx.recreate_helper_on_retune = true;
 	qdf_sleep(WMA_INJECTION_PEER_COOLDOWN_MS);
 	return QDF_STATUS_SUCCESS;
@@ -747,6 +799,10 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 			if (QDF_IS_STATUS_ERROR(status))
 				return status;
 		} else if (g_inj_tx_vdev.chanfreq == chanfreq) {
+			pr_info("VIFDIAG helper-reuse request_monitor=%u owner_monitor=%u helper_vdev=%u freq=%u owner_match=%u\n",
+				mon_vdev_id, g_inj_tx_vdev.monitor_vdev_id,
+				g_inj_tx_vdev.vdev_id, chanfreq,
+				mon_vdev_id == g_inj_tx_vdev.monitor_vdev_id);
 			return QDF_STATUS_SUCCESS;
 		}
 	}
@@ -1072,6 +1128,9 @@ static QDF_STATUS wma_injection_destroy_tx_vdev(tp_wma_handle wma)
 					g_inj_tx_vdev.vdev_id,
 					g_inj_tx_vdev.unicast_peer_addr,
 					WMA_INJECTION_PEER_RSP_DELETE);
+			wma_injection_diag_peer_owners(
+				wma, g_inj_tx_vdev.unicast_peer_addr,
+				"teardown-directed-delete-submit");
 			status = wmi_unified_peer_delete_send(
 				wma->wmi_handle,
 				g_inj_tx_vdev.unicast_peer_addr,
@@ -1124,6 +1183,9 @@ static QDF_STATUS wma_injection_destroy_tx_vdev(tp_wma_handle wma)
 					g_inj_tx_vdev.vdev_id,
 					g_inj_tx_vdev.mac_addr,
 					WMA_INJECTION_PEER_RSP_DELETE);
+			wma_injection_diag_peer_owners(
+				wma, g_inj_tx_vdev.mac_addr,
+				"teardown-self-delete-submit");
 			status = wmi_unified_peer_delete_send(
 				wma->wmi_handle, g_inj_tx_vdev.mac_addr,
 				g_inj_tx_vdev.vdev_id);
