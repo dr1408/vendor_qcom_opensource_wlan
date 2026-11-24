@@ -5692,15 +5692,26 @@ struct ol_txrx_vdev_t *ol_txrx_get_vdev_from_soc_vdev_id(
  *            error if not found.
  */
 uint8_t ol_txrx_get_mon_vdev_from_pdev(struct cdp_soc_t *soc_hdl,
-				       uint8_t pdev_id)
+					       uint8_t pdev_id)
 {
 	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
-	ol_txrx_pdev_handle pdev = ol_txrx_get_pdev_from_pdev_id(soc, pdev_id);
+	ol_txrx_pdev_handle pdev;
+	uint8_t vdev_id = (uint8_t)-EINVAL;
 
+	if (qdf_unlikely(!soc))
+		return vdev_id;
+
+	pdev = ol_txrx_get_pdev_from_pdev_id(soc, pdev_id);
 	if (qdf_unlikely(!pdev))
-		return -EINVAL;
+		return vdev_id;
 
-	return pdev->monitor_vdev->vdev_id;
+	/* Protect monitor_vdev against concurrent vdev detach. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (pdev->monitor_vdev)
+		vdev_id = pdev->monitor_vdev->vdev_id;
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+
+	return vdev_id;
 }
 
 /**
