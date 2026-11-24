@@ -39,6 +39,9 @@
 
 /* header files for our own APIs */
 #include <ol_txrx_api.h>
+#include "ol_monitor_mgmt.h"
+#include <linux/atomic.h>
+#include <linux/moduleparam.h>
 #include <ol_txrx_dbg.h>
 #include <cdp_txrx_ocb.h>
 #include <ol_txrx_ctrl_api.h>
@@ -87,6 +90,10 @@
 #ifdef DP_SUPPORT_RECOVERY_NOTIFY
 #include <qdf_notifier.h>
 #include <qdf_hang_event_notifier.h>
+#endif
+
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+static atomic64_t ol_monitor_mgmt_epoch = ATOMIC64_INIT(0);
 #endif
 
 #define DPT_DEBUGFS_PERMS	(QDF_FILE_USR_READ |	\
@@ -2032,8 +2039,17 @@ ol_txrx_vdev_attach(struct cdp_soc_t *soc_hdl, uint8_t pdev_id,
 
 	/* add this vdev into the pdev's list */
 	TAILQ_INSERT_TAIL(&pdev->vdev_list, vdev, vdev_list_elem);
-	if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam())
+	/* Concurrent monitor VDEVs do not change the global con_mode. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (op_mode == wlan_op_mode_monitor ||
+	    QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()) {
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+		vdev->monitor_mgmt_frequency = 0;
+		vdev->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
+#endif
 		pdev->monitor_vdev = vdev;
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 
 	ol_txrx_hl_tdls_flag_reset(soc_hdl, vdev_id, false);
 
@@ -2086,10 +2102,24 @@ static QDF_STATUS ol_txrx_vdev_register(struct cdp_soc_t *soc_hdl,
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	qdf_spin_lock_bh(&vdev->pdev->peer_ref_mutex);
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+	if (vdev->opmode == wlan_op_mode_monitor) {
+		vdev->monitor_mgmt_frequency = 0;
+		vdev->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
+	}
+#endif
 	vdev->osif_dev = osif_vdev;
 	vdev->rx = txrx_ops->rx.rx;
 	vdev->stats_rx = txrx_ops->rx.stats_rx;
 	vdev->tx_comp = txrx_ops->tx.tx_comp;
+	qdf_spin_unlock_bh(&vdev->pdev->peer_ref_mutex);
+	if (vdev->opmode == wlan_op_mode_monitor ||
+	    QDF_GLOBAL_MONITOR_MODE == cds_get_conparam())
+		QDF_TRACE(QDF_MODULE_ID_TXRX, QDF_TRACE_LEVEL_WARN,
+			  "VIFDIAG OL monitor rx-register vdev=%u rx_cb=%u mon_cb=%u self_peer=%u con_mode=%u",
+			  vdev_id, !!txrx_ops->rx.rx, !!txrx_ops->rx.mon,
+			  !!vdev->pdev->self_peer, cds_get_conparam());
 	txrx_ops->tx.tx = ol_tx_data;
 
 	return QDF_STATUS_SUCCESS;
@@ -5682,6 +5712,192 @@ struct ol_txrx_vdev_t *ol_txrx_get_vdev_from_soc_vdev_id(
 
 	return vdev;
 }
+
+
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+/* Read-only: opt in when loading the experimental module. Global con_mode=4
+ * is deliberately excluded to avoid duplicates on its working HTT RX path.
+ */
+static bool ol_monitor_wmi_rx;
+module_param(ol_monitor_wmi_rx, bool, 0444);
+MODULE_PARM_DESC(ol_monitor_wmi_rx, "Copy on-channel WMI management RX to OL monitor VIF");
+/* Counters are module-lifetime and exact even when diagnostic lines rate-limit. */
+static atomic64_t ol_monitor_wmi_seen = ATOMIC64_INIT(0);
+static atomic64_t ol_monitor_wmi_delivered = ATOMIC64_INIT(0);
+static atomic64_t ol_monitor_wmi_dropped = ATOMIC64_INIT(0);
+
+static int ol_monitor_mgmt_counter_get(char *buf, const struct kernel_param *kp)
+{
+	return scnprintf(buf, PAGE_SIZE, "%lld\n",
+			 (long long)atomic64_read((atomic64_t *)kp->arg));
+}
+
+static const struct kernel_param_ops ol_monitor_mgmt_counter_ops = {
+	.get = ol_monitor_mgmt_counter_get,
+};
+module_param_cb(ol_monitor_wmi_seen, &ol_monitor_mgmt_counter_ops,
+		&ol_monitor_wmi_seen, 0444);
+module_param_cb(ol_monitor_wmi_delivered, &ol_monitor_mgmt_counter_ops,
+		&ol_monitor_wmi_delivered, 0444);
+module_param_cb(ol_monitor_wmi_dropped, &ol_monitor_mgmt_counter_ops,
+		&ol_monitor_wmi_dropped, 0444);
+
+
+
+void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc_hdl, uint8_t id,
+                                uint32_t frequency)
+{
+	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
+	struct ol_txrx_pdev_t *pdev;
+	struct ol_txrx_vdev_t *mon;
+
+	if (!soc)
+		return;
+	pdev = ol_txrx_get_pdev_from_pdev_id(soc, OL_TXRX_PDEV_ID);
+	if (!pdev)
+		return;
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	mon = pdev->monitor_vdev;
+	if (mon && mon->vdev_id == id && mon->opmode == wlan_op_mode_monitor) {
+		mon->monitor_mgmt_frequency = frequency;
+		mon->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
+		pr_info_ratelimited("VIFMGMT state vdev=%u freq=%u generation=%llu enabled=%u\n",
+			id, frequency, (unsigned long long)mon->monitor_mgmt_generation,
+			ol_monitor_wmi_rx);
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+}
+
+/* Snapshot and delivery are serialized with monitor unpublication on detach.
+ * The callback only enqueues to the network stack and must not sleep or reenter
+ * OL. Holding this lock through that callback prevents osif_dev use after free.
+ * No borrowed frame/params pointer escapes this synchronous call.
+ */
+void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
+                        uint32_t frequency, int32_t rssi, uint8_t status,
+                        uint32_t event_pdev_id)
+{
+	struct ol_txrx_soc_t *soc = (struct ol_txrx_soc_t *)soc_hdl;
+	struct ol_txrx_pdev_t *pdev;
+	struct ol_txrx_vdev_t *mon;
+	qdf_nbuf_t copy;
+	uint64_t generation;
+	uint32_t length, rtlen, hdrlen;
+	uint8_t id, *data, *rt;
+	bool has_rssi = rssi >= -128 && rssi < 0;
+	const char *reason = "no-monitor";
+
+	if (!ol_monitor_wmi_rx || cds_get_conparam() == QDF_GLOBAL_MONITOR_MODE)
+		return;
+	atomic64_inc(&ol_monitor_wmi_seen);
+	if (!soc || !frame) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		return;
+	}
+	if (event_pdev_id != OL_TXRX_PDEV_ID) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=pdev event=%u expected=%u\n",
+			event_pdev_id, OL_TXRX_PDEV_ID);
+		return;
+	}
+	length = qdf_nbuf_len(frame);
+	if (status || !frequency || frequency > 65535 || length < 24 ||
+	    length > 4096 || qdf_nbuf_is_nonlinear(frame)) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=event status=%u freq=%u len=%u\n",
+			status, frequency, length);
+		return;
+	}
+	data = qdf_nbuf_data(frame);
+	/* IEEE80211 protocol version 0, management type; optional HT control. */
+	hdrlen = 24 + ((data[1] & 0x80) ? 4 : 0);
+	if ((data[0] & 0x0f) || length < hdrlen ||
+	    ((data[0] == 0x80 || data[0] == 0x50) && length < hdrlen + 12)) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=header fc=%02x/%02x len=%u\n",
+			data[0], data[1], length);
+		return;
+	}
+	pdev = ol_txrx_get_pdev_from_pdev_id(soc, OL_TXRX_PDEV_ID);
+	if (!pdev) {
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=no-pdev\n");
+		return;
+	}
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	mon = pdev->monitor_vdev;
+	if (!mon || mon->opmode != wlan_op_mode_monitor || !mon->rx ||
+	    !mon->osif_dev || qdf_atomic_read(&mon->delete.detaching))
+		goto unlock_drop;
+	if (!mon->monitor_mgmt_frequency || mon->monitor_mgmt_frequency != frequency) {
+		reason = "channel-or-not-ready";
+		goto unlock_drop;
+	}
+	generation = mon->monitor_mgmt_generation;
+	id = mon->vdev_id;
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+
+	/* FLAGS, aligned CHANNEL, optional signed dBm RSSI. No invented TSF/FCS. */
+	rtlen = has_rssi ? 15 : 14;
+	copy = qdf_nbuf_alloc(NULL, rtlen + length, 0, 4, false);
+	if (!copy || !qdf_nbuf_put_tail(copy, rtlen + length)) {
+		if (copy)
+			qdf_nbuf_free(copy);
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=allocation\n");
+		return;
+	}
+	rt = qdf_nbuf_data(copy);
+	qdf_mem_zero(rt, rtlen);
+	rt[2] = rtlen;
+	rt[4] = 0x0a | (has_rssi ? 0x20 : 0); /* present bits1,3,5 */
+	rt[10] = frequency & 0xff;
+	rt[11] = frequency >> 8;
+	/* Only band is known. Do not invent CCK/OFDM modulation from frequency. */
+	rt[13] = frequency < 3000 ? 0x00 : 0x01;
+	rt[12] = frequency < 3000 ? 0x80 : 0x00;
+	if (frequency >= 5955)
+		rt[12] = rt[13] = 0;
+	if (has_rssi)
+		rt[14] = (int8_t)rssi;
+	qdf_mem_copy(rt + rtlen, data, length);
+
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	mon = pdev->monitor_vdev;
+	if (!mon || mon->vdev_id != id || mon->opmode != wlan_op_mode_monitor ||
+	    mon->monitor_mgmt_generation != generation ||
+	    mon->monitor_mgmt_frequency != frequency ||
+	    qdf_atomic_read(&mon->delete.detaching) || !mon->rx || !mon->osif_dev) {
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		qdf_nbuf_free(copy);
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=stale-generation\n");
+		return;
+	}
+	qdf_nbuf_set_next(copy, NULL);
+	/* HDD consumes the private copy on success, never the WMI original.
+	 * Its early validation failure leaves the copy owned by this caller.
+	 */
+	if (mon->rx(mon->osif_dev, copy) != QDF_STATUS_SUCCESS) {
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		qdf_nbuf_free(copy);
+		atomic64_inc(&ol_monitor_wmi_dropped);
+		pr_info_ratelimited("VIFMGMT drop=callback\n");
+		return;
+	}
+	atomic64_inc(&ol_monitor_wmi_delivered);
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+	pr_info_ratelimited("VIFMGMT delivered vdev=%u freq=%u fc=%02x len=%u generation=%llu\n",
+		id, frequency, data[0], length, (unsigned long long)generation);
+	return;
+
+unlock_drop:
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+	atomic64_inc(&ol_monitor_wmi_dropped);
+	pr_info_ratelimited("VIFMGMT drop=%s freq=%u fc=%02x len=%u\n",
+		reason, frequency, data[0], length);
+}
+#endif /* FEATURE_MONITOR_MODE_SUPPORT */
 
 /**
  * ol_txrx_get_mon_vdev_from_pdev() - get monitor mode vdev from pdev
