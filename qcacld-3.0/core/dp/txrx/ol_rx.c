@@ -1656,9 +1656,15 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
 	if (ol_monitor_mode0_diag &&
 	    (monitor_fallback || (!peer && pdev->monitor_vdev))) {
+		struct htt_host_rx_desc_base *rx_desc;
+		qdf_ether_header_t *eth = NULL;
 		uint8_t mon_id = 0xff;
 		uint8_t self_id = 0xff;
 		uint8_t self_state = 0xff;
+		uint16_t self_local_id = 0xffff;
+		uint8_t selected_id = 0xff;
+		uint8_t selected_state = 0xff;
+		uint16_t selected_local_id = 0xffff;
 
 		qdf_spin_lock_bh(&pdev->peer_ref_mutex);
 		if (pdev->monitor_vdev)
@@ -1667,11 +1673,50 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 			self_id = pdev->self_peer->vdev ?
 				pdev->self_peer->vdev->vdev_id : 0xff;
 			self_state = pdev->self_peer->state;
+			self_local_id = pdev->self_peer->local_id;
 		}
 		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
-		ol_txrx_info("MONDIAG inord con=%u peer_id=%u tid=%u msdus=%u fallback=%u mon_vdev=%u self_vdev=%u self_state=%u selected=%pK",
+		if (peer) {
+			selected_id = peer->vdev ? peer->vdev->vdev_id : 0xff;
+			selected_state = peer->state;
+			selected_local_id = peer->local_id;
+		}
+		ol_txrx_info("MONDIAG inord con=%u peer_id=%u tid=%u msdus=%u fallback=%u mon_vdev=%u self_present=%u self_vdev=%u self_local=%u self_state=%u selected_vdev=%u selected_local=%u selected_state=%u",
 			cds_get_conparam(), peer_id, tid, msdu_count,
-			monitor_fallback, mon_id, self_id, self_state, peer);
+			monitor_fallback, mon_id, self_local_id != 0xffff, self_id,
+			self_local_id, self_state, selected_id, selected_local_id,
+			selected_state);
+
+		/* This is host-visible descriptor/payload state after HTT pop. */
+		rx_desc = htt_rx_desc(head_msdu);
+		if (qdf_nbuf_len(head_msdu) >= sizeof(*eth))
+			eth = (qdf_ether_header_t *)qdf_nbuf_data(head_msdu);
+		if (eth) {
+			ol_txrx_info("MONDIAG inord-frame peer_id=%u decap=%u len=%u eth_da=%pM eth_sa=%pM eth_type=0x%04x attn{null=%u mgmt=%u ctrl=%u nonqos=%u invalid=%u timeout=%u directed=%u} msdu{sa_idx=%u}",
+				peer_id, rx_desc->msdu_start.decap_format,
+				qdf_nbuf_len(head_msdu), eth->ether_dhost,
+				eth->ether_shost, qdf_ntohs(eth->ether_type),
+				rx_desc->attention.null_data,
+				rx_desc->attention.mgmt_type,
+				rx_desc->attention.ctrl_type,
+				rx_desc->attention.non_qos,
+				rx_desc->attention.peer_idx_invalid,
+				rx_desc->attention.peer_idx_timeout,
+				rx_desc->attention.directed,
+				rx_desc->msdu_start.sa_idx);
+		} else {
+			ol_txrx_info("MONDIAG inord-frame peer_id=%u decap=%u len=%u payload=no-ethernet attn{null=%u mgmt=%u ctrl=%u nonqos=%u invalid=%u timeout=%u directed=%u} msdu{sa_idx=%u}",
+				peer_id, rx_desc->msdu_start.decap_format,
+				qdf_nbuf_len(head_msdu),
+				rx_desc->attention.null_data,
+				rx_desc->attention.mgmt_type,
+				rx_desc->attention.ctrl_type,
+				rx_desc->attention.non_qos,
+				rx_desc->attention.peer_idx_invalid,
+				rx_desc->attention.peer_idx_timeout,
+				rx_desc->attention.directed,
+				rx_desc->msdu_start.sa_idx);
+		}
 	}
 #endif
 
@@ -1735,9 +1780,9 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 				mon_mac = pdev->monitor_vdev->mac_id;
 			}
 			qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
-			ol_txrx_warn("MONDIAG unknown-peer con=%u peer=%u tid=%u offload=%u msdus=%u mon_vdev=%u mon_mac=%u self_peer=%pK",
+			ol_txrx_warn("MONDIAG unknown-peer con=%u peer=%u tid=%u offload=%u msdus=%u mon_vdev=%u mon_mac=%u self_present=%u",
 				cds_get_conparam(), peer_id, tid, is_offload, msdu_count,
-				mon_id, mon_mac, pdev->self_peer);
+				mon_id, mon_mac, !!pdev->self_peer);
 		}
 #endif
 		ol_txrx_dbg("Couldn't find peer from ID 0x%x", peer_id);

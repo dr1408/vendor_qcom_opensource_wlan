@@ -2281,8 +2281,8 @@ ol_txrx_vdev_detach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
 	if (pdev->monitor_vdev == vdev) {
 		if (ol_monitor_mode0_diag)
-			pr_info("MONDIAG monitor-vdev detach vdev=%u self_peer=%pK\n",
-				vdev->vdev_id, pdev->self_peer);
+			pr_info("MONDIAG monitor-vdev detach vdev=%u self_present=%u\n",
+				vdev->vdev_id, !!pdev->self_peer);
 		pdev->monitor_vdev = NULL;
 	}
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
@@ -2643,8 +2643,8 @@ ol_txrx_peer_attach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 	     vdev == pdev->monitor_vdev) && !pdev->self_peer) {
 		pdev->self_peer = peer;
 		if (ol_monitor_mode0_diag)
-			pr_info("MONDIAG self-peer set peer=%pK vdev=%u state=%u con=%u mac=" QDF_MAC_ADDR_FMT "\n",
-				peer, vdev_id, peer->state, cds_get_conparam(),
+			pr_info("MONDIAG self-peer set local_id=%u vdev=%u state=%u con=%u mac=" QDF_MAC_ADDR_FMT "\n",
+				peer->local_id, vdev_id, peer->state, cds_get_conparam(),
 				QDF_MAC_ADDR_REF(peer->mac_addr.raw));
 		/*
 		 * No Tx in monitor mode, otherwise results in target assert.
@@ -3441,8 +3441,9 @@ int ol_txrx_peer_release_ref(ol_txrx_peer_handle peer,
 
 		if (pdev->self_peer == peer) {
 			if (ol_monitor_mode0_diag)
-				pr_info("MONDIAG self-peer clear peer=%pK vdev=%u state=%u con=%u\n",
-					peer, peer->vdev ? peer->vdev->vdev_id : 0xff,
+				pr_info("MONDIAG self-peer clear local_id=%u vdev=%u state=%u con=%u\n",
+					peer->local_id,
+					peer->vdev ? peer->vdev->vdev_id : 0xff,
 					peer->state, cds_get_conparam());
 			pdev->self_peer = NULL;
 		}
