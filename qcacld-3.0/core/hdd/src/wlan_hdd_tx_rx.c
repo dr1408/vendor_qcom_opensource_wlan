@@ -2287,6 +2287,12 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 	req->process_time = 0;
 	req->complete_time = 0;
 
+	pr_info_ratelimited("MONDIAG host-tx con=%u mon_vdev=%u mode=%u sid=%u rtap=%u parsed=%u fc=%02x/%02x len=%u mac=%pM\n",
+		hdd_get_conparam(), adapter->vdev_id, adapter->device_mode,
+		req->session_id, has_radiotap, rtap_parsed, frame_data[0],
+		frame_len > 1 ? frame_data[1] : 0, frame_len,
+		adapter->mac_addr.bytes);
+
 	/*
 	 * Populate TX parameters from radiotap extraction.
 	 * If no radiotap was present or parsing failed, these default to 0

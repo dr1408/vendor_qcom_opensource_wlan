@@ -34,6 +34,10 @@
 #include <ol_rx_reorder_timeout.h>      /* OL_RX_REORDER_TIMEOUT_UPDATE */
 #include <ol_rx_defrag.h>       /* ol_rx_defrag_waitlist_flush */
 #include <ol_txrx_internal.h>
+
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+extern bool ol_monitor_mode0_diag;
+#endif
 #include <ol_txrx.h>
 #include <wdi_event.h>
 #ifdef QCA_SUPPORT_SW_TXRX_ENCAP
@@ -1688,6 +1692,20 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	if (peer) {
 		vdev = peer->vdev;
 	} else {
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+		if (ol_monitor_mode0_diag) {
+			uint8_t mon_id = 0xff, mon_mac = 0xff;
+			qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+			if (pdev->monitor_vdev) {
+				mon_id = pdev->monitor_vdev->vdev_id;
+				mon_mac = pdev->monitor_vdev->mac_id;
+			}
+			qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+			ol_txrx_warn("MONDIAG unknown-peer con=%u peer=%u tid=%u offload=%u msdus=%u mon_vdev=%u mon_mac=%u self_peer=%pK",
+				cds_get_conparam(), peer_id, tid, is_offload, msdu_count,
+				mon_id, mon_mac, pdev->self_peer);
+		}
+#endif
 		ol_txrx_dbg("Couldn't find peer from ID 0x%x", peer_id);
 		while (head_msdu) {
 			qdf_nbuf_t msdu = head_msdu;

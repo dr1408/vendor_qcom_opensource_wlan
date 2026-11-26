@@ -108,9 +108,7 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
 	uint8_t vdev_id;
 	int ret;
-#ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
-#endif
 
 	hdd_enter_dev(dev);
 
@@ -118,7 +116,13 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 	if (vdev_id < 0)
 		return -EINVAL;
 
+	pr_info("MONDIAG enable con=%u dev=%s mon_vdev=%u adapter_vdev=%u mode=%u mac=%pM dp_pdev=%u\n",
+		cds_get_conparam(), dev->name, vdev_id, adapter ? adapter->vdev_id : 0xff,
+		adapter ? adapter->device_mode : 0xff,
+		adapter ? adapter->mac_addr.bytes : NULL, OL_TXRX_PDEV_ID);
 	ret = cdp_set_monitor_mode(soc, vdev_id, false);
+	pr_info("MONDIAG enable-result con=%u mon_vdev=%u status=%d\n",
+		cds_get_conparam(), vdev_id, ret);
 
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 	/* Enable frame injection when monitor mode is enabled */

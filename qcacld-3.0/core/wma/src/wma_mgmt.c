@@ -3934,6 +3934,11 @@ static int wma_mgmt_rx_process(void *handle, uint8_t *data,
 			wma_handle->wmi_handle, mgmt_rx_params->pdev_id,
 			&event_target_pdev)))
 		event_target_pdev = WMI_HOST_PDEV_ID_INVALID;
+	if (mgmt_rx_params->buf_len >= 24)
+		wma_info("MONDIAG wmi-event host_pdev=%u target_pdev=%u freq=%u status=%u fc=%02x/%02x len=%u sa=%pM da=%pM",
+			mgmt_rx_params->pdev_id, event_target_pdev,
+			mgmt_rx_params->chan_freq, mgmt_rx_params->status,
+			bufp[0], bufp[1], mgmt_rx_params->buf_len, bufp + 10, bufp + 4);
 	ol_monitor_mgmt_rx(cds_get_context(QDF_MODULE_ID_SOC), wbuf,
 		mgmt_rx_params->chan_freq, mgmt_rx_params->rssi,
 		mgmt_rx_params->status, event_target_pdev);

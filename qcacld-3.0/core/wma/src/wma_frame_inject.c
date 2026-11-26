@@ -2887,6 +2887,10 @@ QDF_STATUS wma_send_injection_frame_to_fw(tp_wma_handle wma_handle,
 	if (!QDF_IS_STATUS_ERROR(status)) {
 		wmi_tx_ok = true;
 		g_wma_injection_ctx.stats.command_submitted++;
+		wma_info("MONDIAG wmi-tx-submit desc=%u vdev=%u freq=%u tx_type=%u service=%u monitor=%u",
+			 mgmt_params.desc_id, mgmt_params.vdev_id, mgmt_params.chanfreq,
+			 mgmt_params.tx_type, wmi_mgmt_service ? 1 : 0,
+			 monitor_vdev ? 1 : 0);
 	} else {
 		qdf_spin_lock_bh(&g_wma_injection_ctx.cache_lock);
 		{
@@ -3056,6 +3060,10 @@ QDF_STATUS wma_handle_injection_fw_response(tp_wma_handle wma_handle,
 		wma_injection_unmap_tx_buf(tx_buf);
 		qdf_nbuf_free(tx_buf);
 	}
+
+	wma_info("MONDIAG wmi-tx-complete desc=%u status=%s(%u) tracked=%u buffer=%u inflight=%d",
+		desc_id, status_str, status, have_entry ? 1 : 0, tx_buf ? 1 : 0,
+		qdf_atomic_read(&g_wma_injection_ctx.inflight_count));
 
 	if (!have_entry) {
 		if (ctx->stats.fw_errors <= 10)

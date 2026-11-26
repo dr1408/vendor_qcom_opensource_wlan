@@ -9014,6 +9014,10 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 	}
 
 	hdd_debug("Set monitor mode frequency %d", freq);
+	pr_info("MONDIAG set-chan-enter con=%u mon_vdev=%u mode=%u mac=%pM freq=%u bw=%u sta_mon=%u\n",
+		hdd_get_conparam(), adapter->vdev_id, adapter->device_mode,
+		adapter->mac_addr.bytes, freq, bandwidth,
+		policy_mgr_is_sta_mon_concurrency(hdd_ctx->psoc));
 	qdf_mem_zero(&roam_profile, sizeof(roam_profile));
 	roam_profile.ChannelInfo.freq_list = &ch_info->freq;
 	roam_profile.ChannelInfo.numOfChannels = 1;
@@ -9049,6 +9053,9 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 	}
 	adapter->monitor_mode_vdev_up_in_progress = true;
 
+	pr_info("MONDIAG set-chan-submit con=%u mon_vdev=%u freq=%u bw=%u cbmode=%u hw_bw=%u\n",
+		hdd_get_conparam(), adapter->vdev_id, freq, bandwidth,
+		roam_profile.ch_params.ch_width, ch_params.ch_width);
 	status = sme_roam_channel_change_req(hdd_ctx->mac_handle,
 					     bssid, adapter->vdev_id,
 					     &roam_profile.ch_params,
@@ -9085,6 +9092,9 @@ int wlan_hdd_set_mon_chan(struct hdd_adapter *adapter, qdf_freq_t freq,
 		adapter->monitor_mode_vdev_up_in_progress = false;
 	}
 
+	pr_info("MONDIAG set-chan-result con=%u mon_vdev=%u freq=%u status=%d in_progress=%u\n",
+		hdd_get_conparam(), adapter->vdev_id, freq, status,
+		adapter->monitor_mode_vdev_up_in_progress);
 	return qdf_status_to_os_return(status);
 }
 #endif

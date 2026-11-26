@@ -94,6 +94,11 @@
 
 #ifdef FEATURE_MONITOR_MODE_SUPPORT
 static atomic64_t ol_monitor_mgmt_epoch = ATOMIC64_INIT(0);
+/* One-build ownership diagnostic. Set 0 at runtime to silence it. */
+bool ol_monitor_mode0_diag = true;
+module_param(ol_monitor_mode0_diag, bool, 0644);
+MODULE_PARM_DESC(ol_monitor_mode0_diag,
+	"Trace mode-0 monitor configuration, RX ownership and host injection");
 #endif
 
 #define DPT_DEBUGFS_PERMS	(QDF_FILE_USR_READ |	\
@@ -5769,11 +5774,12 @@ void ol_monitor_mgmt_set_channel(struct cdp_soc_t *soc_hdl, uint8_t id,
 	if (mon && mon->vdev_id == id && mon->opmode == wlan_op_mode_monitor) {
 		mon->monitor_mgmt_frequency = frequency;
 		mon->monitor_mgmt_generation = atomic64_inc_return(&ol_monitor_mgmt_epoch);
-		pr_info_ratelimited("VIFMGMT state vdev=%u mac=%u target=%u dp_pdev=%u freq=%u generation=%llu enabled=%u\n",
-			id, mon->mac_id, WMA_MAC_TO_PDEV_MAP(mon->mac_id),
-			OL_TXRX_PDEV_ID, frequency,
-			(unsigned long long)mon->monitor_mgmt_generation,
-			ol_monitor_wmi_rx);
+		if (ol_monitor_mode0_diag)
+			pr_info("MONDIAG state con=%u mon_vdev=%u mon_mac=%u target_pdev=%u dp_pdev=%u freq=%u generation=%llu wmi_copy=%u\n",
+				cds_get_conparam(), id, mon->mac_id,
+				WMA_MAC_TO_PDEV_MAP(mon->mac_id), OL_TXRX_PDEV_ID,
+				frequency, (unsigned long long)mon->monitor_mgmt_generation,
+				ol_monitor_wmi_rx);
 	}
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
 }
@@ -5907,6 +5913,10 @@ void ol_monitor_mgmt_rx(struct cdp_soc_t *soc_hdl, qdf_nbuf_t frame,
 	}
 	atomic64_inc(&ol_monitor_wmi_delivered);
 	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+	if (ol_monitor_mode0_diag)
+		pr_info_ratelimited("MONDIAG wmi-rx con=%u mon_vdev=%u mon_mac=%u target_pdev=%u freq=%u fc=%02x/%02x len=%u sa=%pM da=%pM\n",
+			cds_get_conparam(), id, mac_id, event_target_pdev, frequency,
+			data[0], data[1], length, data + 10, data + 4);
 	pr_info_ratelimited("VIFMGMT delivered vdev=%u mac=%u target=%u dp_pdev=%u freq=%u fc=%02x len=%u generation=%llu\n",
 		id, mac_id, event_target_pdev, OL_TXRX_PDEV_ID, frequency,
 		data[0], length, (unsigned long long)generation);
