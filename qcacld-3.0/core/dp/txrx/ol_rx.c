@@ -1578,6 +1578,7 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	uint32_t filled = 0;
 	uint8_t bssid[QDF_MAC_ADDR_SIZE];
 	bool offloaded_pkt;
+	bool monitor_fallback = false;
 	struct ol_txrx_soc_t *soc = cds_get_context(QDF_MODULE_ID_SOC);
 
 	if (qdf_unlikely(!soc))
@@ -1590,10 +1591,21 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 	}
 
 	if (pdev) {
-		if (qdf_unlikely(QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()))
+		if (qdf_unlikely(QDF_GLOBAL_MONITOR_MODE == cds_get_conparam())) {
 			peer = pdev->self_peer;
-		else
+		} else {
 			peer = ol_txrx_peer_find_by_id(pdev, peer_id);
+			/*
+			 * Firmware does not map foreign promiscuous monitor traffic
+			 * to a normal peer.  Deliver it only through the monitor
+			 * peer established during monitor-session creation.
+			 */
+			if (!peer && pdev->monitor_vdev && pdev->self_peer &&
+			    pdev->self_peer->vdev == pdev->monitor_vdev) {
+				peer = pdev->self_peer;
+				monitor_fallback = true;
+			}
+		}
 		htt_pdev = pdev->htt_pdev;
 	} else {
 		ol_txrx_err("Invalid pdev passed!");
@@ -1640,6 +1652,28 @@ ol_rx_in_order_indication_handler(ol_txrx_pdev_handle pdev,
 		ol_txrx_dbg("No packet to send to HDD");
 		return;
 	}
+
+#ifdef FEATURE_MONITOR_MODE_SUPPORT
+	if (ol_monitor_mode0_diag &&
+	    (monitor_fallback || (!peer && pdev->monitor_vdev))) {
+		uint8_t mon_id = 0xff;
+		uint8_t self_id = 0xff;
+		uint8_t self_state = 0xff;
+
+		qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+		if (pdev->monitor_vdev)
+			mon_id = pdev->monitor_vdev->vdev_id;
+		if (pdev->self_peer) {
+			self_id = pdev->self_peer->vdev ?
+				pdev->self_peer->vdev->vdev_id : 0xff;
+			self_state = pdev->self_peer->state;
+		}
+		qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+		ol_txrx_info("MONDIAG inord con=%u peer_id=%u tid=%u msdus=%u fallback=%u mon_vdev=%u self_vdev=%u self_state=%u selected=%pK",
+			cds_get_conparam(), peer_id, tid, msdu_count,
+			monitor_fallback, mon_id, self_id, self_state, peer);
+	}
+#endif
 
 	/* Send the chain of MSDUs to the OS */
 	/* rx_opt_proc takes a NULL-terminated list of msdu netbufs */

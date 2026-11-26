@@ -3955,29 +3955,42 @@ int hdd_set_mon_rx_cb(struct net_device *dev)
 	cdp_vdev_register(soc, adapter->vdev_id,
 			  (ol_osif_vdev_handle)adapter,
 			  &txrx_ops);
-	/* peer is created wma_vdev_attach->wma_create_peer */
-	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
-	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("cdp_peer_register() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
-		goto exit;
-	}
 
+	/*
+	 * The monitor session must create/attach the DP peer before HDD
+	 * registers it and moves it to AUTH.  Registering before the session
+	 * (or registering twice) leaves the OL monitor peer without the
+	 * self_peer ownership used by the concurrent monitor RX fallback.
+	 */
+	hdd_info("MONDIAG mon-peer begin vdev=%u mac=" QDF_MAC_ADDR_FMT,
+		 adapter->vdev_id, QDF_MAC_ADDR_REF(adapter->mac_addr.bytes));
 	qdf_status = sme_create_mon_session(hdd_ctx->mac_handle,
 					    adapter->mac_addr.bytes,
 					    adapter->vdev_id);
 	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("sme_create_mon_session() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
-	}
-
-	/* peer is created wma_vdev_attach->wma_create_peer */
-	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
-	if (QDF_STATUS_SUCCESS != qdf_status) {
-		hdd_err("cdp_peer_register() failed to register. Status= %d [0x%08X]",
-			qdf_status, qdf_status);
+		hdd_err("MONDIAG mon-peer session failed vdev=%u status=%d [0x%08X]",
+			adapter->vdev_id, qdf_status, qdf_status);
 		goto exit;
 	}
+
+	/* The peer was created by wma_vdev_attach -> wma_create_peer. */
+	qdf_status = cdp_peer_register(soc, OL_TXRX_PDEV_ID, &sta_desc);
+	if (QDF_STATUS_SUCCESS != qdf_status) {
+		hdd_err("MONDIAG mon-peer register failed vdev=%u status=%d [0x%08X]",
+			adapter->vdev_id, qdf_status, qdf_status);
+		goto exit;
+	}
+
+	qdf_status = cdp_peer_state_update(soc, adapter->mac_addr.bytes,
+					   OL_TXRX_PEER_STATE_AUTH);
+	if (QDF_STATUS_SUCCESS != qdf_status) {
+		hdd_err("MONDIAG mon-peer auth failed vdev=%u status=%d [0x%08X]",
+			adapter->vdev_id, qdf_status, qdf_status);
+		goto exit;
+	}
+
+	hdd_info("MONDIAG mon-peer ready vdev=%u state=AUTH mac=" QDF_MAC_ADDR_FMT,
+		 adapter->vdev_id, QDF_MAC_ADDR_REF(adapter->mac_addr.bytes));
 
 exit:
 	ret = qdf_status_to_os_return(qdf_status);

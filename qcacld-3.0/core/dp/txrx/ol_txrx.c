@@ -2277,6 +2277,16 @@ ol_txrx_vdev_detach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 	/* remove the vdev from its parent pdev's list */
 	TAILQ_REMOVE(&pdev->vdev_list, vdev, vdev_list_elem);
 
+	/* Unpublish monitor ownership before the vdev can be freed. */
+	qdf_spin_lock_bh(&pdev->peer_ref_mutex);
+	if (pdev->monitor_vdev == vdev) {
+		if (ol_monitor_mode0_diag)
+			pr_info("MONDIAG monitor-vdev detach vdev=%u self_peer=%pK\n",
+				vdev->vdev_id, pdev->self_peer);
+		pdev->monitor_vdev = NULL;
+	}
+	qdf_spin_unlock_bh(&pdev->peer_ref_mutex);
+
 	/*
 	 * Use peer_ref_mutex while accessing peer_list, in case
 	 * a peer is in the process of being removed from the list.
@@ -2625,9 +2635,17 @@ ol_txrx_peer_attach(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 #ifdef QCA_SUPPORT_PEER_DATA_RX_RSSI
 	peer->rssi_dbm = HTT_RSSI_INVALID;
 #endif
-	if ((QDF_GLOBAL_MONITOR_MODE == cds_get_conparam()) &&
-	    !pdev->self_peer) {
+	/*
+	 * Concurrent monitor mode does not change con_mode.  The peer owned by
+	 * monitor_vdev is the sole fallback owner for un-mapped monitor RX.
+	 */
+	if ((QDF_GLOBAL_MONITOR_MODE == cds_get_conparam() ||
+	     vdev == pdev->monitor_vdev) && !pdev->self_peer) {
 		pdev->self_peer = peer;
+		if (ol_monitor_mode0_diag)
+			pr_info("MONDIAG self-peer set peer=%pK vdev=%u state=%u con=%u mac=" QDF_MAC_ADDR_FMT "\n",
+				peer, vdev_id, peer->state, cds_get_conparam(),
+				QDF_MAC_ADDR_REF(peer->mac_addr.raw));
 		/*
 		 * No Tx in monitor mode, otherwise results in target assert.
 		 * Setting disable_intrabss_fwd to true
@@ -3421,9 +3439,13 @@ int ol_txrx_peer_release_ref(ol_txrx_peer_handle peer,
 
 		ol_txrx_dump_peer_access_list(peer);
 
-		if (QDF_GLOBAL_MONITOR_MODE == cds_get_conparam() &&
-		    pdev->self_peer == peer)
+		if (pdev->self_peer == peer) {
+			if (ol_monitor_mode0_diag)
+				pr_info("MONDIAG self-peer clear peer=%pK vdev=%u state=%u con=%u\n",
+					peer, peer->vdev ? peer->vdev->vdev_id : 0xff,
+					peer->state, cds_get_conparam());
 			pdev->self_peer = NULL;
+		}
 
 		if (!del_rc)
 			qdf_mem_free(peer);
@@ -5040,8 +5062,9 @@ static void ol_rx_data_handler(struct ol_txrx_pdev_t *pdev,
 		goto free_buf;
 
 	qdf_spin_lock_bh(&peer->peer_info_lock);
-	if (qdf_unlikely(!(peer->state >= OL_TXRX_PEER_STATE_CONN) ||
-					 !peer->vdev->rx)) {
+	if (qdf_unlikely((!(peer->state >= OL_TXRX_PEER_STATE_CONN) &&
+			  peer->vdev != pdev->monitor_vdev) ||
+			 !peer->vdev->rx)) {
 		qdf_spin_unlock_bh(&peer->peer_info_lock);
 		ol_txrx_peer_release_ref(peer, PEER_DEBUG_ID_OL_RX_THREAD);
 		goto free_buf;
@@ -5203,7 +5226,8 @@ void ol_rx_data_process(struct ol_txrx_peer_t *peer,
 	qdf_assert(peer->vdev);
 
 	qdf_spin_lock_bh(&peer->peer_info_lock);
-	if (peer->state >= OL_TXRX_PEER_STATE_CONN)
+	if (peer->state >= OL_TXRX_PEER_STATE_CONN ||
+	    peer->vdev == pdev->monitor_vdev)
 		data_rx = peer->vdev->rx;
 	qdf_spin_unlock_bh(&peer->peer_info_lock);
 
