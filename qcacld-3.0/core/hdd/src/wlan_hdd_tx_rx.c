@@ -2225,10 +2225,7 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 		goto drop;
 	}
 
-	/*
-	 * Prefer radiotap format (normal for monitor TX), but allow fallback to
-	 * raw 802.11 if userspace or netdev path does not prepend radiotap.
-	 */
+	/* Identify the normal radiotap + raw-802.11 monitor TX format. */
 	if (skb->len >= sizeof(struct ieee80211_radiotap_header)) {
 		rthdr = (struct ieee80211_radiotap_header *)skb->data;
 		if (rthdr->it_version == 0) {
@@ -2236,6 +2233,22 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 			if (rtap_len >= sizeof(struct ieee80211_radiotap_header) && rtap_len < skb->len)
 				has_radiotap = true;
 		}
+	}
+
+	/*
+	 * A secondary monitor VIF in mission mode remains an ordinary Linux
+	 * netdev.  Bringing it UP can make the host stack emit IPv6/link-local
+	 * traffic on it.  Such Ethernet-originated skbs have no radiotap header
+	 * but used to be parsed as raw 802.11 and queued for injection.  Keep the
+	 * raw fallback for global monitor mode, while making concurrent mode an
+	 * explicit radiotap-only boundary.
+	 */
+	if (!has_radiotap &&
+	    hdd_get_conparam() == QDF_GLOBAL_MISSION_MODE) {
+		pr_info_ratelimited("MONDIAG drop non-rtap mode0 dev=%s proto=%04x len=%u first=%02x/%02x mac=%pM\n",
+			dev->name, ntohs(skb->protocol), skb->len, skb->data[0],
+			skb->len > 1 ? skb->data[1] : 0, adapter->mac_addr.bytes);
+		goto drop;
 	}
 
 	/*
