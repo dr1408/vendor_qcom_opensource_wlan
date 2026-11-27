@@ -179,6 +179,24 @@ bool wma_injection_peer_delete_response(uint8_t vdev_id,
 void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle);
 
 /**
+ * wma_injection_set_mode0_rx_isolation() - isolate mode-0 monitor RX
+ * @wma_handle: WMA context
+ * @sta_vdev_id: normal disconnected STA vdev
+ * @mon_vdev_id: monitor vdev being enabled or disabled
+ * @enable: apply (true) or restore (false) the isolation filter
+ *
+ * Mode 0 keeps the normal firmware personality alive.  The injection helper
+ * is a firmware-only STA vdev, so it cannot use normal host vdev ownership.
+ * Apply a narrow per-vdev RX filter to the normal STA and helper: drop only
+ * FromDS and ToDS data indications there, leaving monitor-vdev RX unchanged.
+ * This is deliberately not an HTT RX-ring reconfiguration.
+ */
+QDF_STATUS wma_injection_set_mode0_rx_isolation(tp_wma_handle wma_handle,
+						 uint8_t sta_vdev_id,
+						 uint8_t mon_vdev_id,
+						 bool enable);
+
+/**
  * wma_injection_notify_channel_change() - Retarget the monitor TX helper
  * @wma_handle: WMA handle
  * @mon_vdev_id: Monitor vdev whose channel changed
@@ -410,6 +428,14 @@ wma_injection_peer_delete_response(uint8_t vdev_id,
 
 static inline void wma_injection_pre_stop_cleanup(tp_wma_handle wma_handle)
 {
+}
+
+static inline QDF_STATUS
+wma_injection_set_mode0_rx_isolation(tp_wma_handle wma_handle,
+					     uint8_t sta_vdev_id,
+					     uint8_t mon_vdev_id, bool enable)
+{
+	return QDF_STATUS_SUCCESS;
 }
 
 static inline QDF_STATUS

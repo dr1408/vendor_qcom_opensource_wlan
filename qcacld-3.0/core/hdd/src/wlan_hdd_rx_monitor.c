@@ -28,6 +28,7 @@
 #include "ol_txrx.h"
 #include "ol_monitor_mgmt.h"
 #include "cdp_txrx_mon.h"
+#include "wma_frame_inject.h"
 #ifdef FEATURE_FRAME_INJECTION_SUPPORT
 #include "wlan_hdd_frame_inject.h"
 #endif
@@ -103,6 +104,52 @@ void hdd_monitor_set_rx_monitor_cb(struct ol_txrx_ops *txrx,
 	txrx->rx.mon = rx_monitor_cb;
 }
 
+/*
+ * Mode 0 is not global monitor mode: firmware keeps its normal STA MLME
+ * personality while a separate monitor vdev exists.  Isolate foreign data
+ * indications from normal/helper STA vdevs before monitor activation.  The
+ * monitor vdev itself is deliberately excluded so raw monitor and packet
+ * capture delivery remain unchanged.
+ */
+static int hdd_mode0_rx_isolation(struct hdd_adapter *mon_adapter, bool enable)
+{
+	struct hdd_adapter *sta_adapter;
+	tp_wma_handle wma;
+	QDF_STATUS status;
+
+	if (cds_get_conparam() != QDF_GLOBAL_MISSION_MODE)
+		return 0;
+	if (!mon_adapter || !mon_adapter->hdd_ctx)
+		return -EINVAL;
+
+	sta_adapter = hdd_get_adapter(mon_adapter->hdd_ctx, QDF_STA_MODE);
+	if (!sta_adapter) {
+		hdd_err("MONRXISO no normal STA adapter for monitor vdev=%u",
+			mon_adapter->vdev_id);
+		return -EINVAL;
+	}
+	if (enable && hdd_cm_is_vdev_associated(sta_adapter)) {
+		hdd_err("MONRXISO refusing mode0 activation: STA vdev=%u remains associated",
+			sta_adapter->vdev_id);
+		return -EBUSY;
+	}
+
+	wma = cds_get_context(QDF_MODULE_ID_WMA);
+	if (!wma) {
+		hdd_err("MONRXISO no WMA context sta=%u mon=%u enable=%u",
+			sta_adapter->vdev_id, mon_adapter->vdev_id, enable);
+		return -EINVAL;
+	}
+
+	status = wma_injection_set_mode0_rx_isolation(wma,
+						       sta_adapter->vdev_id,
+						       mon_adapter->vdev_id, enable);
+	hdd_info("MONRXISO %s con=0 sta_vdev=%u mon_vdev=%u sta_assoc=%u status=%d",
+		 enable ? "apply" : "restore", sta_adapter->vdev_id,
+		 mon_adapter->vdev_id, hdd_cm_is_vdev_associated(sta_adapter), status);
+	return QDF_IS_STATUS_ERROR(status) ? -EIO : 0;
+}
+
 int hdd_enable_monitor_mode(struct net_device *dev)
 {
 	void *soc = cds_get_context(QDF_MODULE_ID_SOC);
@@ -120,7 +167,18 @@ int hdd_enable_monitor_mode(struct net_device *dev)
 		cds_get_conparam(), dev->name, vdev_id, adapter ? adapter->vdev_id : 0xff,
 		adapter ? adapter->device_mode : 0xff,
 		adapter ? adapter->mac_addr.bytes : NULL, OL_TXRX_PDEV_ID);
+	ret = hdd_mode0_rx_isolation(adapter, true);
+	if (ret) {
+		hdd_err("MONRXISO activation blocked: mon_vdev=%u status=%d", vdev_id,
+			ret);
+		return ret;
+	}
 	ret = cdp_set_monitor_mode(soc, vdev_id, false);
+	if (ret) {
+		/* cdp activation did not take ownership: immediately undo the
+		 * normal-STA filter so a failed monitor open cannot alter STA RX. */
+		hdd_mode0_rx_isolation(adapter, false);
+	}
 	pr_info("MONDIAG enable-result con=%u mon_vdev=%u status=%d\n",
 		cds_get_conparam(), vdev_id, ret);
 
@@ -172,6 +230,16 @@ int hdd_disable_monitor_mode(struct net_device *dev)
 	}
 #endif
 
+	/* Restore while WMI is still alive. hdd_frame_inject_disable() has
+	 * already destroyed the helper, and cdp_reset_monitor_mode() can begin
+	 * monitor-vdev teardown immediately afterwards. */
+	if (adapter) {
+		int iso_ret = hdd_mode0_rx_isolation(adapter, false);
+
+		if (iso_ret)
+			hdd_warn("MONRXISO restore failed before monitor reset: %d",
+				 iso_ret);
+	}
 	ret = cdp_reset_monitor_mode(soc, OL_TXRX_PDEV_ID, false);
 
 	return ret;

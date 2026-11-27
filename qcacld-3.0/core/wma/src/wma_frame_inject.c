@@ -254,6 +254,31 @@ struct wma_injection_tx_vdev {
 
 static struct wma_injection_tx_vdev g_inj_tx_vdev;
 
+/*
+ * Mode-0 keeps a normal firmware STA personality alongside monitor RX.  Do
+ * not replay the HTT RX ring: Creek firmware asserts in the Copy Engine when
+ * that ring is changed after bring-up.  Instead, ask firmware to discard only
+ * foreign ToDS/FromDS data on normal/helper STA vdevs.  Monitor-vdev RX is
+ * never filtered here.
+ */
+#define WMA_MODE0_RX_ISOLATION_MASK \
+	(WMI_VDEV_RX_FILTER_OUT_FROMDS | WMI_VDEV_RX_FILTER_OUT_TODS)
+
+struct wma_mode0_rx_isolation {
+	bool enabled;
+	uint8_t sta_vdev_id;
+	uint8_t mon_vdev_id;
+	bool sta_applied;
+	bool helper_applied;
+};
+
+static struct wma_mode0_rx_isolation g_mode0_rx_iso;
+static bool ol_monitor_mode0_rx_isolation = true;
+module_param_named(ol_monitor_mode0_rx_isolation,
+		   ol_monitor_mode0_rx_isolation, bool, 0644);
+MODULE_PARM_DESC(ol_monitor_mode0_rx_isolation,
+		 "Filter foreign ToDS/FromDS RX from mode-0 STA/helper vdevs");
+
 #define WMA_INJECTION_PEER_RSP_POLL_MS 5
 #define WMA_INJECTION_PEER_RSP_TIMEOUT_MS 500
 #define WMA_INJECTION_PEER_COOLDOWN_MS 50
@@ -668,6 +693,108 @@ static void wma_injection_reset_session_state(void)
 	 */
 }
 
+/* Firmware-only helper vdevs have no wma->interfaces[] owner.  Use the
+ * direct WMI wrapper for both vdev classes, rather than wma_vdev_set_param(),
+ * so the helper is not rejected by host vdev validation.  Command success is
+ * WMI acceptance, not an asynchronous firmware acknowledgement. */
+static QDF_STATUS
+wma_injection_set_rx_filter(tp_wma_handle wma, uint8_t vdev_id,
+			    uint32_t mask, const char *role)
+{
+	struct vdev_set_params vp = {0};
+	QDF_STATUS status;
+
+	if (!wma || !wma->wmi_handle || wmi_is_blocked(wma->wmi_handle)) {
+		wma_warn("MONRXISO %s vdev=%u mask=0x%x WMI unavailable",
+			 role, vdev_id, mask);
+		return QDF_STATUS_E_AGAIN;
+	}
+
+	vp.vdev_id = vdev_id;
+	vp.param_id = WMI_VDEV_PARAM_RX_FILTER;
+	vp.param_value = mask;
+	status = wmi_unified_vdev_set_param_send(wma->wmi_handle, &vp);
+	wma_info("MONRXISO %s vdev=%u param=0x%x mask=0x%x send_status=%d enabled=%u sta=%u mon=%u helper=%u",
+		 role, vdev_id, WMI_VDEV_PARAM_RX_FILTER, mask, status,
+		 g_mode0_rx_iso.enabled, g_mode0_rx_iso.sta_vdev_id,
+		 g_mode0_rx_iso.mon_vdev_id, g_inj_tx_vdev.created ?
+		 g_inj_tx_vdev.vdev_id : 0xff);
+	return status;
+}
+
+QDF_STATUS
+wma_injection_set_mode0_rx_isolation(tp_wma_handle wma, uint8_t sta_vdev_id,
+				     uint8_t mon_vdev_id, bool enable)
+{
+	QDF_STATUS status = QDF_STATUS_SUCCESS;
+	QDF_STATUS helper_status;
+
+	if (cds_get_conparam() != QDF_GLOBAL_MISSION_MODE)
+		return QDF_STATUS_SUCCESS;
+
+	if (!ol_monitor_mode0_rx_isolation) {
+		wma_info("MONRXISO bypass con=0 requested=%u sta=%u mon=%u module=0",
+			 enable, sta_vdev_id, mon_vdev_id);
+		return QDF_STATUS_SUCCESS;
+	}
+
+	if (enable) {
+		if (g_mode0_rx_iso.enabled &&
+		    (g_mode0_rx_iso.sta_vdev_id != sta_vdev_id ||
+		     g_mode0_rx_iso.mon_vdev_id != mon_vdev_id)) {
+			wma_err("MONRXISO conflicting enable old_sta=%u old_mon=%u new_sta=%u new_mon=%u",
+				g_mode0_rx_iso.sta_vdev_id, g_mode0_rx_iso.mon_vdev_id,
+				sta_vdev_id, mon_vdev_id);
+			return QDF_STATUS_E_BUSY;
+		}
+
+		status = wma_injection_set_rx_filter(wma, sta_vdev_id,
+						     WMA_MODE0_RX_ISOLATION_MASK,
+						     "normal-sta apply");
+		if (QDF_IS_STATUS_ERROR(status))
+			return status;
+
+		g_mode0_rx_iso.enabled = true;
+		g_mode0_rx_iso.sta_vdev_id = sta_vdev_id;
+		g_mode0_rx_iso.mon_vdev_id = mon_vdev_id;
+		g_mode0_rx_iso.sta_applied = true;
+
+		if (g_inj_tx_vdev.created &&
+		    g_inj_tx_vdev.monitor_vdev_id == mon_vdev_id) {
+			helper_status = wma_injection_set_rx_filter(wma,
+					g_inj_tx_vdev.vdev_id,
+					WMA_MODE0_RX_ISOLATION_MASK,
+					"helper apply");
+			if (QDF_IS_STATUS_ERROR(helper_status)) {
+				wma_injection_set_rx_filter(wma, sta_vdev_id, 0,
+						    "normal-sta rollback");
+				qdf_mem_zero(&g_mode0_rx_iso,
+						     sizeof(g_mode0_rx_iso));
+				return helper_status;
+			}
+			g_mode0_rx_iso.helper_applied = true;
+		}
+		wma_info("MONRXISO apply complete sta=%u mon=%u mask=0x%x helper_created=%u",
+			 sta_vdev_id, mon_vdev_id, WMA_MODE0_RX_ISOLATION_MASK,
+			 g_inj_tx_vdev.created);
+		return QDF_STATUS_SUCCESS;
+	}
+
+	if (g_mode0_rx_iso.helper_applied && g_inj_tx_vdev.created &&
+	    g_inj_tx_vdev.monitor_vdev_id == mon_vdev_id)
+		wma_injection_set_rx_filter(wma, g_inj_tx_vdev.vdev_id, 0,
+					    "helper restore");
+
+	if (g_mode0_rx_iso.sta_applied)
+		status = wma_injection_set_rx_filter(wma,
+					     g_mode0_rx_iso.sta_vdev_id, 0,
+					     "normal-sta restore");
+	wma_info("MONRXISO restore complete sta=%u mon=%u status=%d",
+		 g_mode0_rx_iso.sta_vdev_id, g_mode0_rx_iso.mon_vdev_id, status);
+	qdf_mem_zero(&g_mode0_rx_iso, sizeof(g_mode0_rx_iso));
+	return status;
+}
+
 /**
  * wma_injection_ensure_tx_vdev() - Ensure hidden STA vdev exists for TX
  * @wma: WMA handle
@@ -713,6 +840,16 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 			if (QDF_IS_STATUS_ERROR(status))
 				return status;
 		} else if (g_inj_tx_vdev.chanfreq == chanfreq) {
+			if (g_mode0_rx_iso.enabled && !g_mode0_rx_iso.helper_applied &&
+			    g_mode0_rx_iso.mon_vdev_id == mon_vdev_id) {
+				status = wma_injection_set_rx_filter(wma,
+					g_inj_tx_vdev.vdev_id,
+					WMA_MODE0_RX_ISOLATION_MASK,
+					"helper self-heal");
+				if (QDF_IS_STATUS_ERROR(status))
+					return status;
+				g_mode0_rx_iso.helper_applied = true;
+			}
 			return QDF_STATUS_SUCCESS;
 		}
 	}
@@ -750,6 +887,17 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 				wma_warn("Injection helper restart response failed: vdev=%u freq=%u status=%d, recreating",
 					 g_inj_tx_vdev.vdev_id, chanfreq, status);
 				goto restart_failed;
+			}
+
+			if (g_mode0_rx_iso.enabled &&
+			    g_mode0_rx_iso.mon_vdev_id == mon_vdev_id) {
+				status = wma_injection_set_rx_filter(wma,
+					g_inj_tx_vdev.vdev_id,
+					WMA_MODE0_RX_ISOLATION_MASK,
+					"helper restart apply");
+				if (QDF_IS_STATUS_ERROR(status))
+					goto restart_failed;
+				g_mode0_rx_iso.helper_applied = true;
 			}
 
 			/* Keep the helper TX-only so monitor RX remains on its vdev. */
@@ -896,6 +1044,18 @@ restart_failed:
 		goto err_stop;
 	}
 
+	/* Apply before peer creation: a helper vdev becomes an RX/MLME candidate
+	 * as soon as firmware owns its self peer. */
+	if (g_mode0_rx_iso.enabled &&
+	    g_mode0_rx_iso.mon_vdev_id == mon_vdev_id) {
+		status = wma_injection_set_rx_filter(wma, vid,
+					    WMA_MODE0_RX_ISOLATION_MASK,
+					    "helper create apply");
+		if (QDF_IS_STATUS_ERROR(status))
+			goto err_stop;
+		g_mode0_rx_iso.helper_applied = true;
+	}
+
 	/* ---------- 3. PEER CREATE (self-peer → fw vdev+0xc) ---------- */
 	qdf_mem_zero(&pcreate, sizeof(pcreate));
 	pcreate.peer_addr = inj_mac;
@@ -984,6 +1144,18 @@ static QDF_STATUS wma_injection_destroy_tx_vdev(tp_wma_handle wma)
 		return QDF_STATUS_E_INVAL;
 
 	helper_vdev_id = g_inj_tx_vdev.vdev_id;
+	if (g_mode0_rx_iso.helper_applied &&
+	    g_mode0_rx_iso.mon_vdev_id == g_inj_tx_vdev.monitor_vdev_id) {
+		QDF_STATUS restore_status;
+
+		restore_status = wma_injection_set_rx_filter(wma, helper_vdev_id, 0,
+						     "helper destroy restore");
+		if (QDF_IS_STATUS_ERROR(restore_status))
+			wma_warn("MONRXISO helper restore before destroy failed: vdev=%u status=%d",
+				 helper_vdev_id, restore_status);
+		g_mode0_rx_iso.helper_applied = false;
+	}
+
 	if (!wma->wmi_handle || wmi_is_blocked(wma->wmi_handle)) {
 		wma_info("WMI stopped: clearing injection helper host state vdev %u",
 			 helper_vdev_id);
