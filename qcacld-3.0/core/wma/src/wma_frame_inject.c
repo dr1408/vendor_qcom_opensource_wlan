@@ -270,10 +270,15 @@ struct wma_mode0_rx_isolation {
 	uint8_t mon_vdev_id;
 	bool sta_applied;
 	bool helper_applied;
+	uint32_t monitor_filter;
 };
 
 static struct wma_mode0_rx_isolation g_mode0_rx_iso;
 static bool ol_monitor_mode0_rx_isolation = true;
+/* Default is zero: applying a data RX filter to monitor vdev can suppress
+ * raw data/EAPOL capture. This writable parameter is a contained live A/B
+ * diagnostic for the firmware ownership hypothesis. */
+static unsigned int ol_monitor_mode0_monitor_rx_filter;
 module_param_named(ol_monitor_mode0_rx_isolation,
 		   ol_monitor_mode0_rx_isolation, bool, 0644);
 MODULE_PARM_DESC(ol_monitor_mode0_rx_isolation,
@@ -722,6 +727,54 @@ wma_injection_set_rx_filter(tp_wma_handle wma, uint8_t vdev_id,
 	return status;
 }
 
+/*
+ * Live A/B control for the monitor vdev itself.  Unlike the normal-STA
+ * isolation, this deliberately has no default mask: FromDS/ToDS data on the
+ * monitor vdev may include EAPOL.  A successful write confirms only WMI
+ * command acceptance; MONRXISO records the exact vdev and mask for each test.
+ */
+static int wma_mode0_monitor_rx_filter_set(const char *val,
+					   const struct kernel_param *kp)
+{
+	tp_wma_handle wma;
+	unsigned int requested;
+	QDF_STATUS status;
+	int ret;
+
+	ret = kstrtouint(val, 0, &requested);
+	if (ret)
+		return ret;
+	if (requested & ~0x1f)
+		return -EINVAL;
+	if (cds_get_conparam() != QDF_GLOBAL_MISSION_MODE)
+		return -EBUSY;
+	if (!g_mode0_rx_iso.enabled || g_mode0_rx_iso.mon_vdev_id == 0xff)
+		return -EAGAIN;
+
+	wma = cds_get_context(QDF_MODULE_ID_WMA);
+	status = wma_injection_set_rx_filter(wma,
+					     g_mode0_rx_iso.mon_vdev_id,
+					     requested, "monitor live-set");
+	if (QDF_IS_STATUS_ERROR(status))
+		return -EIO;
+
+	*(unsigned int *)kp->arg = requested;
+	g_mode0_rx_iso.monitor_filter = requested;
+	wma_info("MONRXISO monitor-live set con=0 mon_vdev=%u mask=0x%x; data/EAPOL monitor delivery may be filtered",
+		 g_mode0_rx_iso.mon_vdev_id, requested);
+	return 0;
+}
+
+static const struct kernel_param_ops wma_mode0_monitor_rx_filter_ops = {
+	.set = wma_mode0_monitor_rx_filter_set,
+	.get = param_get_uint,
+};
+module_param_cb(ol_monitor_mode0_monitor_rx_filter,
+			&wma_mode0_monitor_rx_filter_ops,
+			&ol_monitor_mode0_monitor_rx_filter, 0644);
+MODULE_PARM_DESC(ol_monitor_mode0_monitor_rx_filter,
+		 "Live mode-0 monitor-vdev RX_FILTER mask (0 default; diagnostic)");
+
 QDF_STATUS
 wma_injection_set_mode0_rx_isolation(tp_wma_handle wma, uint8_t sta_vdev_id,
 				     uint8_t mon_vdev_id, bool enable)
@@ -778,6 +831,18 @@ wma_injection_set_mode0_rx_isolation(tp_wma_handle wma, uint8_t sta_vdev_id,
 			 sta_vdev_id, mon_vdev_id, WMA_MODE0_RX_ISOLATION_MASK,
 			 g_inj_tx_vdev.created);
 		return QDF_STATUS_SUCCESS;
+	}
+
+	if (g_mode0_rx_iso.monitor_filter) {
+		QDF_STATUS mon_restore;
+
+		mon_restore = wma_injection_set_rx_filter(wma, mon_vdev_id, 0,
+							  "monitor teardown restore");
+		if (QDF_IS_STATUS_ERROR(mon_restore))
+			wma_warn("MONRXISO monitor restore failed: vdev=%u status=%d",
+				 mon_vdev_id, mon_restore);
+		g_mode0_rx_iso.monitor_filter = 0;
+		ol_monitor_mode0_monitor_rx_filter = 0;
 	}
 
 	if (g_mode0_rx_iso.helper_applied && g_inj_tx_vdev.created &&
